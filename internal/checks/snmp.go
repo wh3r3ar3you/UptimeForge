@@ -45,7 +45,9 @@ func snmpClient(ctx context.Context, p params) *gosnmp.GoSNMP {
 		Community: p["community"],
 	}
 	if deadline, ok := ctx.Deadline(); ok {
-		x.Timeout = max(time.Until(deadline)/3, 100*time.Millisecond)
+		// All attempts end well before the deadline, so a silent agent is
+		// answered with its own hint, not the runner's bare deadline.
+		x.Timeout = max(time.Until(deadline)*2/3/time.Duration(x.Retries+1), 100*time.Millisecond)
 	}
 	switch p["snmp_version"] {
 	case "1":

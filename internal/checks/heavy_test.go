@@ -380,3 +380,15 @@ func TestRealDriversRefused(t *testing.T) {
 		}
 	}
 }
+
+// Every SNMP attempt fits inside the check's deadline with room to spare,
+// so a silent agent gets the "community or credentials" hint rather than a
+// bare deadline from the check runner.
+func TestSNMPAttemptsFitTheDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	x := snmpClient(ctx, params{"port": "161", "oid": "1.3.6.1.2.1.1.5.0"})
+	if total := x.Timeout * time.Duration(x.Retries+1); total > 2*time.Second*3/4 {
+		t.Fatalf("%d attempts of %v take %v of a 2s deadline", x.Retries+1, x.Timeout, total)
+	}
+}
