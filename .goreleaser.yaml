@@ -48,8 +48,15 @@ archives:
   - id: raw
     formats: [binary]
     name_template: "{{ .Binary }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}"
-  # The same with the licenses, for people who download by hand.
-  - id: packaged
+  # The same with the licenses, for people who download by hand: one
+  # archive per binary, so every platform holds the same set.
+  - id: packaged-hub
+    ids: [hub]
+    formats: [tar.gz]
+    name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE, README.md, THIRD_PARTY_LICENSES.csv]
+  - id: packaged-agent
+    ids: [agent, agent-lite]
     formats: [tar.gz]
     format_overrides:
       - {goos: windows, formats: [zip]}
