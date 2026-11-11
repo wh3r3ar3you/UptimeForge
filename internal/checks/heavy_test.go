@@ -131,6 +131,9 @@ func TestBrowserReal(t *testing.T) {
 	if findChromium() == "" {
 		t.Skip("no Chromium here")
 	}
+	if os.Getenv("CI") != "" && os.Getenv("UF_TEST_BROWSER") == "" {
+		t.Skip("a real Chromium is too slow to start on shared CI runners; UF_TEST_BROWSER=1 runs it")
+	}
 	// This tests the check, not the host: CI runners (Ubuntu with AppArmor
 	// restricting user namespaces) cannot give Chromium its sandbox.
 	t.Setenv("UF_BROWSER_NO_SANDBOX", "1")

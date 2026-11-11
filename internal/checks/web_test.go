@@ -144,14 +144,26 @@ func TestHTTPMTLS(t *testing.T) {
 // startDNS runs a miekg server on UDP and TCP on the same port.
 func startDNS(t *testing.T, h dns.HandlerFunc) string {
 	t.Helper()
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := pc.LocalAddr().(*net.UDPAddr).Port
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		t.Fatal(err)
+	// DNS answers on UDP and TCP of one port: take a free UDP port and try
+	// again while its TCP twin is taken by something else.
+	var (
+		pc   net.PacketConn
+		ln   net.Listener
+		port int
+	)
+	for try := 0; ; try++ {
+		var err error
+		if pc, err = net.ListenPacket("udp", "127.0.0.1:0"); err != nil {
+			t.Fatal(err)
+		}
+		port = pc.LocalAddr().(*net.UDPAddr).Port
+		if ln, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
+			break
+		}
+		pc.Close()
+		if try == 20 {
+			t.Fatal(err)
+		}
 	}
 	udp := &dns.Server{PacketConn: pc, Handler: h}
 	tcp := &dns.Server{Listener: ln, Handler: h}
