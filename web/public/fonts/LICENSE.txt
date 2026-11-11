@@ -1,0 +1,3 @@
+TwemojiCountryFlags.woff2 is a subset of Twemoji by Twitter, Inc. and contributors,
+licensed under CC-BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+Packaged by country-flag-emoji-polyfill (MIT).

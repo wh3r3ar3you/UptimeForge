@@ -1,0 +1,26 @@
+== Incident
+🔴 <b>Не работает</b> · <b>Сайт a&lt;b &amp; c&gt;</b>
+<code>https://example.com/</code>
+<blockquote expandable>❌ 🇩🇪 probe-1 · таймаут
+❌ 🇳🇱 probe-2 · таймаут
+✅ 🇷🇺 probe-0 · 12 ms
+✅ 🇷🇺 probe-3 · 12 ms</blockquote>
+🔗 Затронуто проверок: 2 — cfg-1, a&lt;b &amp; c&gt;
+⏱ с 09:00 · 3 ч · 👥 120 онлайн · <a href="https://hub.example.com/checks/web">Открыть</a>
+✅ Принял: a&lt;b &amp; c&gt;
+== RichIncident
+<h3>🔴 Не работает · Сайт a&lt;b &amp; c&gt;</h3><p><code>https://example.com/</code></p><table bordered striped compact><tr><th>Проба</th><th>Состояние</th></tr><tr><td>🇩🇪 probe-1</td><td>❌ таймаут</td></tr><tr><td>🇳🇱 probe-2</td><td>❌ таймаут</td></tr><tr><td>🇷🇺 probe-0</td><td>✅ 12 ms</td></tr><tr><td>🇷🇺 probe-3</td><td>✅ 12 ms</td></tr></table><p>🔗 Затронуто проверок: 2 — cfg-1, a&lt;b &amp; c&gt;</p><footer>⏱ с 09:00 · 3 ч · 👥 120 онлайн · <a href="https://hub.example.com/checks/web">Открыть</a></footer><p>✅ Принял: a&lt;b &amp; c&gt;</p>
+== EscalatedReply
+⬆️ Стало хуже: 🔴 <b>Не работает</b> · Сайт a&lt;b &amp; c&gt;
+== RemindReply
+⏰ Всё ещё 🔴 <b>Не работает</b> · Сайт a&lt;b &amp; c&gt; · уже 3 ч
+== Resolved
+🟢 <b>Восстановлено</b> · <b>Сайт a&lt;b &amp; c&gt;</b>
+<code>https://example.com/</code>
+⏱ 09:00 → 12:00 · 3 ч · 👥 было онлайн до 120
+Было: 🔴 Не работает · 0 из 0 проб
+✅ Принял: a&lt;b &amp; c&gt;
+== RichResolved
+<h3>🟢 Восстановлено · Сайт a&lt;b &amp; c&gt;</h3><p>⏱ 09:00 → 12:00 · 3 ч · 👥 было онлайн до 120</p><p>Было: 🔴 Не работает · 0 из 0 проб</p><p>✅ Принял: a&lt;b &amp; c&gt;</p>
+== RichResolved by hand
+<h3>☑️ Закрыто вручную · Сайт a&lt;b &amp; c&gt;</h3><p>⏱ 09:00 → 12:00 · 3 ч · 👥 было онлайн до 120</p><p>Было: 🔴 Не работает · 0 из 0 проб</p><p>☑️ Закрыл leo · пока не восстановится, тревог по нему не будет</p><p>✅ Принял: a&lt;b &amp; c&gt;</p>

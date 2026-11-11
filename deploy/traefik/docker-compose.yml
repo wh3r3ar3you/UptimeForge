@@ -1,0 +1,73 @@
+# UptimeForge on a VPS behind Traefik: HTTPS from Let's Encrypt via labels.
+# Good when Traefik already fronts other services: keep only the hub and
+# postgres services and add the hub's labels to your setup.
+#
+# 1. Point a DNS A/AAAA record (e.g. status.example.com) at this server; open ports 80 and 443.
+# 2. In this folder:
+#      echo "UF_DOMAIN=status.example.com" > .env
+#      echo "ACME_EMAIL=you@example.com" >> .env
+#      echo "UF_DB_PASSWORD=$(openssl rand -hex 24)" >> .env
+#      echo "UF_SETUP_TOKEN=$(openssl rand -hex 16)" >> .env
+#      docker compose up -d
+# 3. Open https://status.example.com and create the admin with the setup token from .env.
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: uptimeforge
+      POSTGRES_PASSWORD: ${UF_DB_PASSWORD:?put UF_DB_PASSWORD into .env}
+      POSTGRES_DB: uptimeforge
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U uptimeforge]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  hub:
+    image: intoxxx/uptimeforge-hub:latest
+    restart: unless-stopped
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      UF_DATABASE_URL: postgres://uptimeforge:${UF_DB_PASSWORD}@postgres:5432/uptimeforge?sslmode=disable
+      UF_PUBLIC_URL: https://${UF_DOMAIN:?put UF_DOMAIN into .env}
+      UF_SETUP_TOKEN: ${UF_SETUP_TOKEN:-}
+      UF_ADMIN_TOKEN: ${UF_ADMIN_TOKEN:-}
+      UF_METRICS_TOKEN: ${UF_METRICS_TOKEN:-}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - hub-data:/data
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.uptimeforge.rule: Host(`${UF_DOMAIN}`)
+      traefik.http.routers.uptimeforge.entrypoints: websecure
+      traefik.http.routers.uptimeforge.tls.certresolver: le
+      traefik.http.services.uptimeforge.loadbalancer.server.port: "8080"
+
+  traefik:
+    image: traefik:v3.3
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL:?put ACME_EMAIL into .env}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+
+volumes:
+  pg-data:
+  hub-data:
+  letsencrypt:

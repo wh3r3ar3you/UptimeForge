@@ -1,0 +1,34 @@
+== Incident
+🟡 <b>Partial</b> · <b>big</b>
+<blockquote expandable>❌ 🇩🇪 probe-1 · timeout
+❌ 🇳🇱 probe-2 · timeout
+❌ 🇩🇪 probe-4 · timeout
+❌ 🇳🇱 probe-5 · timeout
+❌ 🇩🇪 probe-7 · timeout
+❌ 🇳🇱 probe-8 · timeout
+❌ 🇩🇪 probe-10 · timeout
+❌ 🇳🇱 probe-11 · timeout
+❌ 🇩🇪 probe-13 · timeout
+❌ 🇳🇱 probe-14 · timeout
+✅ 🇷🇺 probe-0 · 12 ms
+✅ 🇷🇺 probe-3 · 12 ms
+✅ 🇷🇺 probe-6 · 12 ms
+✅ 🇷🇺 probe-9 · 12 ms
+✅ 🇷🇺 probe-12 · 12 ms
+… and 5 more</blockquote>
+💡 Connections never establish: looks like IP blocking.
+⏱ since 09:00 · 3 h · <a href="https://hub.example.com/checks/big">Open</a>
+== RichIncident
+<h3>🟡 Partial · big</h3><details><summary>13 of 20 probes</summary><table bordered striped compact><tr><th>Probe</th><th>State</th></tr><tr><td>🇩🇪 probe-1</td><td>❌ timeout</td></tr><tr><td>🇳🇱 probe-2</td><td>❌ timeout</td></tr><tr><td>🇩🇪 probe-4</td><td>❌ timeout</td></tr><tr><td>🇳🇱 probe-5</td><td>❌ timeout</td></tr><tr><td>🇩🇪 probe-7</td><td>❌ timeout</td></tr><tr><td>🇳🇱 probe-8</td><td>❌ timeout</td></tr><tr><td>🇩🇪 probe-10</td><td>❌ timeout</td></tr><tr><td>🇳🇱 probe-11</td><td>❌ timeout</td></tr><tr><td>🇩🇪 probe-13</td><td>❌ timeout</td></tr><tr><td>🇳🇱 probe-14</td><td>❌ timeout</td></tr><tr><td>🇩🇪 probe-16</td><td>❌ timeout</td></tr><tr><td>🇳🇱 probe-17</td><td>❌ timeout</td></tr><tr><td>🇩🇪 probe-19</td><td>❌ timeout</td></tr><tr><td>🇷🇺 probe-0</td><td>✅ 12 ms</td></tr><tr><td>🇷🇺 probe-3</td><td>✅ 12 ms</td></tr><tr><td colspan="2">… and 5 more</td></tr></table></details><blockquote>💡 Connections never establish: looks like IP blocking.</blockquote><footer>⏱ since 09:00 · 3 h · <a href="https://hub.example.com/checks/big">Open</a></footer>
+== EscalatedReply
+⬆️ Got worse: 🟡 <b>Partial</b> · big
+== RemindReply
+⏰ Still 🟡 <b>Partial</b> · big · for 3 h
+== Resolved
+🟢 <b>Recovered</b> · <b>big</b>
+⏱ 09:00 → 12:00 · 3 h
+Was: 🟡 Partial · 0 of 0 probes
+== RichResolved
+<h3>🟢 Recovered · big</h3><p>⏱ 09:00 → 12:00 · 3 h</p><p>Was: 🟡 Partial · 0 of 0 probes</p>
+== RichResolved by hand
+<h3>☑️ Closed by hand · big</h3><p>⏱ 09:00 → 12:00 · 3 h</p><p>Was: 🟡 Partial · 0 of 0 probes</p><p>☑️ Closed by leo · no alerts for it until it recovers</p>

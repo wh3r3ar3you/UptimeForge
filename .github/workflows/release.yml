@@ -1,0 +1,71 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  # A release is only cut from a commit whose tests pass.
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  binaries:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cd web && npm ci --no-audit --no-fund && npm run build
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  images:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [hub, agent]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go run github.com/google/go-licenses@v1.6.0 report ./cmd/... > THIRD_PARTY_LICENSES.csv
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # Docker Hub: intoxxx/uptimeforge-hub and intoxxx/uptimeforge-agent.
+          images: docker.io/intoxxx/uptimeforge-${{ matrix.target }}
+          # 1.2.3 and 1.2; "latest" only for stable releases, not -rc.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # The same version string as the GoReleaser binaries: 0.1.0, not v0.1.0.
+          build-args: VERSION=${{ steps.meta.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

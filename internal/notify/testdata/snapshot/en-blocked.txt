@@ -1,0 +1,27 @@
+== Incident
+🟠 <b>Blocked in RU</b> · <b>de-node-1 · Reality</b>
+<code>VLESS · de1.example.com:443</code>
+<blockquote expandable>❌ 🇩🇪 probe-1 · timeout
+❌ 🇳🇱 probe-2 · timeout
+❌ 🇩🇪 probe-4 · timeout
+❌ 🇳🇱 probe-5 · timeout
+✅ 🇷🇺 probe-0 · 12 ms
+✅ 🇷🇺 probe-3 · 12 ms</blockquote>
+💡 Connections never establish: looks like IP blocking.
+⏱ since 09:00 · 3 h · <a href="https://hub.example.com/checks/vless">Open</a>
+🔕 Muted until 13:00 · leo
+== RichIncident
+<h3>🟠 Blocked in RU · de-node-1 · Reality</h3><p><code>VLESS · de1.example.com:443</code></p><table bordered striped compact><tr><th>Probe</th><th>State</th></tr><tr><td>🇩🇪 probe-1</td><td>❌ timeout</td></tr><tr><td>🇳🇱 probe-2</td><td>❌ timeout</td></tr><tr><td>🇩🇪 probe-4</td><td>❌ timeout</td></tr><tr><td>🇳🇱 probe-5</td><td>❌ timeout</td></tr><tr><td>🇷🇺 probe-0</td><td>✅ 12 ms</td></tr><tr><td>🇷🇺 probe-3</td><td>✅ 12 ms</td></tr></table><blockquote>💡 Connections never establish: looks like IP blocking.</blockquote><footer>⏱ since 09:00 · 3 h · <a href="https://hub.example.com/checks/vless">Open</a></footer><p>🔕 Muted until 13:00 · leo</p>
+== EscalatedReply
+⬆️ Got worse: 🟠 <b>Blocked in RU</b> · de-node-1 · Reality
+== RemindReply
+⏰ Still 🟠 <b>Blocked in RU</b> · de-node-1 · Reality · for 3 h
+== Resolved
+🟢 <b>Recovered</b> · <b>de-node-1 · Reality</b>
+<code>VLESS · de1.example.com:443</code>
+⏱ 09:00 → 12:00 · 3 h
+Was: 🟠 Blocked in RU · 0 of 0 probes
+== RichResolved
+<h3>🟢 Recovered · de-node-1 · Reality</h3><p>⏱ 09:00 → 12:00 · 3 h</p><p>Was: 🟠 Blocked in RU · 0 of 0 probes</p>
+== RichResolved by hand
+<h3>☑️ Closed by hand · de-node-1 · Reality</h3><p>⏱ 09:00 → 12:00 · 3 h</p><p>Was: 🟠 Blocked in RU · 0 of 0 probes</p><p>☑️ Closed by leo · no alerts for it until it recovers</p>

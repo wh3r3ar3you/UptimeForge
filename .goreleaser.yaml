@@ -1,0 +1,66 @@
+version: 2
+project_name: uptimeforge
+
+before:
+  hooks:
+    - go mod download
+    # Every binary carries code under other licenses (MPL-2.0, GPL-3.0 via
+    # xray-core): list them next to the binaries.
+    - sh -c "go run github.com/google/go-licenses@v1.6.0 report ./cmd/... > THIRD_PARTY_LICENSES.csv"
+
+builds:
+  - id: hub
+    main: ./cmd/uptimeforge-hub
+    binary: uptimeforge-hub
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X github.com/wh3r3ar3you/uptimeforge/internal/version.Version={{ .Version }}"]
+    goos: [linux]
+    goarch: [amd64, arm64]
+
+  # Agents run anywhere a probe may live: servers, routers (Keenetic/OpenWrt), desktops.
+  - id: agent
+    main: ./cmd/uptimeforge-agent
+    binary: uptimeforge-agent
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X github.com/wh3r3ar3you/uptimeforge/internal/version.Version={{ .Version }}"]
+    goos: [linux, windows, darwin]
+    goarch: [amd64, arm64]
+    ignore:
+      - {goos: windows, goarch: arm64}
+
+  # Routers have little flash: no heavy database and broker drivers.
+  - id: agent-lite
+    main: ./cmd/uptimeforge-agent
+    binary: uptimeforge-agent
+    tags: [lite]
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X github.com/wh3r3ar3you/uptimeforge/internal/version.Version={{ .Version }}"]
+    goos: [linux]
+    goarch: [arm, mips, mipsle]
+    goarm: ["7"]
+    gomips: [softfloat]
+
+archives:
+  # Raw binaries: what install.sh downloads.
+  - id: raw
+    formats: [binary]
+    name_template: "{{ .Binary }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}"
+  # The same with the licenses, for people who download by hand.
+  - id: packaged
+    formats: [tar.gz]
+    format_overrides:
+      - {goos: windows, formats: [zip]}
+    name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}"
+    files: [LICENSE, README.md, THIRD_PARTY_LICENSES.csv]
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  prerelease: auto
+
+changelog:
+  use: github

@@ -1,0 +1,19 @@
+== Incident
+📡 <b>Subscription unavailable</b> · <b>Подписка</b>
+<blockquote>❌ 📍 hub · HTTP 502</blockquote>
+💡 The hub can&#39;t download the subscription.
+⏱ since 09:00 · 3 h · <a href="https://hub.example.com/checks">Open</a>
+== RichIncident
+<h3>📡 Subscription unavailable · Подписка</h3><pre>HTTP 502</pre><blockquote>💡 The hub can&#39;t download the subscription.</blockquote><footer>⏱ since 09:00 · 3 h · <a href="https://hub.example.com/checks">Open</a></footer>
+== EscalatedReply
+⬆️ Got worse: 📡 <b>Subscription unavailable</b> · Подписка
+== RemindReply
+⏰ Still 📡 <b>Subscription unavailable</b> · Подписка · for 3 h
+== Resolved
+🟢 <b>Recovered</b> · <b>Подписка</b>
+⏱ 09:00 → 12:00 · 3 h
+Was: 📡 Subscription unavailable · 3 h
+== RichResolved
+<h3>🟢 Recovered · Подписка</h3><p>⏱ 09:00 → 12:00 · 3 h</p><p>Was: 📡 Subscription unavailable · 3 h</p>
+== RichResolved by hand
+<h3>☑️ Closed by hand · Подписка</h3><p>⏱ 09:00 → 12:00 · 3 h</p><p>Was: 📡 Subscription unavailable · 3 h</p><p>☑️ Closed by leo · no alerts for it until it recovers</p>

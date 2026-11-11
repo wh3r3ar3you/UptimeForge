@@ -1,0 +1,59 @@
+# The hub keeps everything in PostgreSQL. Put a password in .env first:
+#   echo "UF_DB_PASSWORD=$(openssl rand -hex 24)" >> .env
+#   echo "UF_SETUP_TOKEN=$(openssl rand -hex 16)" >> .env   # asked for when you create the admin
+#   docker compose up -d                      # then open http://127.0.0.1:8080
+#   docker compose --profile metrics up -d    # + VictoriaMetrics for Grafana
+# Put a TLS reverse proxy (Caddy, Traefik, nginx) in front: agents connect to
+# wss://<your-hub>/api/agent/ws and the UI should be served over https.
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: uptimeforge
+      POSTGRES_PASSWORD: ${UF_DB_PASSWORD:?put UF_DB_PASSWORD into .env}
+      POSTGRES_DB: uptimeforge
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U uptimeforge]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  hub:
+    image: intoxxx/uptimeforge-hub:latest
+    restart: unless-stopped
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      UF_DATABASE_URL: postgres://uptimeforge:${UF_DB_PASSWORD}@postgres:5432/uptimeforge?sslmode=disable
+      UF_PUBLIC_URL: ${UF_PUBLIC_URL:-}   # e.g. https://status.example.com — used in alerts and install commands
+      UF_SETUP_TOKEN: ${UF_SETUP_TOKEN:-} # creates the first admin; printed to the log when unset
+      UF_ADMIN_TOKEN: ${UF_ADMIN_TOKEN:-} # optional bearer token for scripts, 32+ characters
+      UF_METRICS_TOKEN: ${UF_METRICS_TOKEN:-} # optional bearer token for /metrics
+      TZ: ${TZ:-UTC}                       # the time zone of alerts and reports
+      # UF_CONFIG: /etc/uptimeforge/config.yaml  # optional: provision probes/checks from a file
+    volumes:
+      - hub-data:/data
+      # - ./config.yaml:/etc/uptimeforge/config.yaml:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  victoriametrics:
+    profiles: [metrics]
+    image: victoriametrics/victoria-metrics:v1.110.0
+    restart: unless-stopped
+    command:
+      - -retentionPeriod=1y
+      - -promscrape.config=/etc/vm/scrape.yml
+    volumes:
+      - ./deploy/scrape.yml:/etc/vm/scrape.yml:ro
+      - vm-data:/victoria-metrics-data
+    ports:
+      - "127.0.0.1:8428:8428"
+
+volumes:
+  pg-data:
+  hub-data:
+  vm-data:

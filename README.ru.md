@@ -1,0 +1,255 @@
+<div align="center">
+
+<img src="web/public/favicon.svg" width="88" alt="UptimeForge" />
+
+# UptimeForge
+
+**Мониторинг VPN- и прокси-инфраструктуры: видно, как ваши ноды видят пользователи.**
+
+Нода лежит, заблокирована в регионе или не работает у одного провайдера? UptimeForge проверяет из многих сетей сразу и говорит, что именно.
+
+[![Stars](https://img.shields.io/github/stars/wh3r3ar3you/UptimeForge?style=for-the-badge&logo=github&label=Star&color=f5c542)](https://github.com/wh3r3ar3you/UptimeForge/stargazers)
+[![Release](https://img.shields.io/github/v/release/wh3r3ar3you/UptimeForge?include_prereleases&style=for-the-badge&color=2ee6c4)](https://github.com/wh3r3ar3you/UptimeForge/releases)
+[![Docker pulls](https://img.shields.io/docker/pulls/intoxxx/uptimeforge-hub?style=for-the-badge&logo=docker&logoColor=white&color=2a8cf0)](https://hub.docker.com/r/intoxxx/uptimeforge-hub)
+[![License](https://img.shields.io/github/license/wh3r3ar3you/UptimeForge?style=for-the-badge&color=8b5cf6)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/wh3r3ar3you/UptimeForge/ci.yml?branch=main&style=for-the-badge&label=tests)](https://github.com/wh3r3ar3you/UptimeForge/actions/workflows/ci.yml)
+
+[English](README.md) · **Русский**
+
+[Возможности](#-возможности) · [Скриншоты](#-скриншоты) · [Быстрый старт](#-быстрый-старт) · [Установка на VPS](#-установка-на-vps) · [Настройка](#%EF%B8%8F-настройка) · [Как выносятся вердикты](#-как-выносятся-вердикты)
+
+<img src="docs/screenshots/dashboard.png" alt="Главная" width="100%" />
+
+</div>
+
+## 💡 Зачем
+
+Мониторинг серверов (Beszel, Zabbix) показывает, что нода жива. Аптайм-мониторы (Uptime Kuma) пингуют её из одной точки. Ни то ни другое не отвечает на вопрос, с которым просыпается VPN-оператор:
+
+> *Могут ли пользователи в стране с фильтрацией подключиться прямо сейчас — а если нет, нода умерла или её режут?*
+
+UptimeForge запускает настоящие проверки **из многих сетей сразу** — домашний провайдер, дата-центры внутри страны с фильтрацией, ноды за рубежом, роутеры, резидентные прокси — и сводит их в один честный вердикт: 🔴 **лежит** везде · 🟠 **заблокирован** в регионе · 🟡 не работает у **части провайдеров**.
+
+## ✨ Возможности
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🔍 Проверки глазами пользователя
+- **Настоящие проверки Xray** — VLESS (Reality, XHTTP, gRPC, WS), VMess, Trojan, Shadowsocks, Hysteria2 через встроенный xray-core, с реальным запросом через туннель. Скачивание 128 КБ ловит DPI, который «замораживает» соединение после ~16 КБ, — пинг такого не видит. Можно проверять IP выхода.
+- **Подписки как проверки** — укажите подписку тестового пользователя (Remnawave, Marzban, 3x-ui…), каждый конфиг станет проверкой.
+- **MTProto-прокси целиком** — настоящий обмен `req_pq` → `resPQ` с дата-центром Telegram через прокси.
+- **Все типы проверок Uptime Kuma** — HTTP(S), TCP, ping, DNS, TLS, базы данных, брокеры, push, Docker, systemd и другие.
+- **Проверка конфигов** — вставьте ссылку и прогоните с любых проб прямо сейчас.
+
+</td>
+<td width="50%" valign="top">
+
+### ⚖️ Вердикты, которые не врут
+- **Много проб — один вердикт** — пробы без интернета исключаются сами: умерший домашний роутер не красит всё в красный.
+- **Зависимости** — когда нода лежит, её конфиги попадают в тревогу ноды как «затронутые», а не шлют тревоги по одной. Связи находятся по адресу или задаются вручную.
+- **Переживает рестарт** — после перезапуска хаб дожидается своих проб, прежде чем что-то объявлять лежащим.
+- **Пробы где угодно** — агенты сами подключаются к хабу (открытые порты не нужны) на Linux, роутерах Keenetic/OpenWrt, Windows, macOS; или хаб проверяет **через прокси** и показывает сеть провайдера, ничего туда не ставя.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🔔 Тревоги, с которыми можно жить
+- **Карточки в Telegram** — одно сообщение на инцидент, оно редактируется по ходу; кнопки «Принял», «Заглушить», «Решено», тихие часы и темы по важности.
+- **Метки и правила** — то, что подходит под правило, уходит в свой чат или тему.
+- **Шаблоны уведомлений** — любое сообщение можно переписать с `{подстановками}`; шаблон никогда не стоит тревоги.
+- **Недельный отчёт** — аптайм, худшие, потерянные ноды, баны, трафик.
+- **Вебхуки с подписью** и **сторож для самого мониторинга**.
+
+</td>
+<td valign="top">
+
+### 🛰 Remnawave и серверы
+- **Панель одним взглядом** — онлайн, ноды на связи и трафик вверху главной.
+- **Тревога «ушли пользователи»** — нода, с которой за минуту ушли почти все, жива, но недоступна: так выглядит бан по DPI.
+- **Нода, потерянная панелью** — отдельная тревога, склеенная с агентом ноды.
+- **Метрики серверов** — CPU со steal и iowait, память, диски, I/O, трафик, TCP; пороги в духе Zabbix, которые не мигают.
+- **Публичные статус-страницы** — по группам проверок или **по локациям VPN**: флаг, ваше название и статус, без внутренностей.
+
+</td>
+</tr>
+</table>
+
+## 📸 Скриншоты
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/checks.png" alt="Проверки" /><br/><sub><b>Проверки</b> — по группам, с полосой пульса за сутки и массовыми действиями</sub></td>
+<td width="50%"><img src="docs/screenshots/check.png" alt="Проверка" /><br/><sub><b>Проверка</b> — какие пробы падают и почему: здесь блокировка в России</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/servers.png" alt="Серверы" /><br/><sub><b>Серверы</b> — метрики со всех агентов, колонки на выбор</sub></td>
+<td><img src="docs/screenshots/remnawave.png" alt="Remnawave" /><br/><sub><b>Remnawave</b> — нагрузка панели, трафик и онлайн</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/incidents.png" alt="Инциденты" /><br/><sub><b>Инциденты</b> — история с причинами и тем, что каждый затронул</sub></td>
+<td><img src="docs/screenshots/templates.png" alt="Шаблоны" /><br/><sub><b>Шаблоны</b> — свой текст для каждой тревоги с живым предпросмотром</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/tools.png" alt="Проверка конфигов" /><br/><sub><b>Проверка конфигов</b> — прогоните ссылку со всех проб до добавления</sub></td>
+<td><img src="docs/screenshots/status.png" alt="Статус-страница" /><br/><sub><b>Публичная статус-страница</b> — по локациям, для клиентов</sub></td>
+</tr>
+</table>
+
+<p align="center"><img src="docs/screenshots/status-mobile.png" alt="Статус-страница на телефоне" width="300" /><br/><sub>Статус-страница на телефоне</sub></p>
+
+## 🚀 Быстрый старт
+
+Нужны Docker с Compose и домен, указывающий на сервер.
+
+```sh
+mkdir uptimeforge && cd uptimeforge
+curl -fsSLO https://raw.githubusercontent.com/wh3r3ar3you/UptimeForge/main/docker-compose.yml
+echo "UF_DB_PASSWORD=$(openssl rand -hex 24)" > .env
+echo "UF_SETUP_TOKEN=$(openssl rand -hex 16)" >> .env
+echo "UF_PUBLIC_URL=https://status.example.com" >> .env
+docker compose up -d
+```
+
+1. **Поставьте HTTPS** — готовые варианты с Caddy, Traefik и nginx в разделе [Установка на VPS](#-установка-на-vps). Агенты подключаются по `wss://`.
+2. **Создайте админа** — откройте интерфейс и введите токен первого запуска из `.env`. Без `UF_SETUP_TOKEN` хаб придумает токен сам и напишет его в лог (`docker compose logs hub`); пока админа нет, без токена хабом не воспользуется никто.
+3. **Добавьте пробы** — *Серверы и пробы → Добавить пробу*. Хаб выдаст установку одной строкой; она сверяет контрольную сумму бинарника:
+
+   ```sh
+   curl -fsSL https://status.example.com/install.sh | sudo UF_HUB=https://status.example.com UF_TOKEN=… sh
+   ```
+
+   Хаб сам по себе тоже проба: держите его **за пределами** региона с фильтрацией, как контрольную точку.
+4. **Добавьте проверки** — ссылку на VPN, подписку, MTProxy, HTTP-адрес, порт, сертификат, DNS-имя.
+5. **Тревоги** — *Настройки → Telegram*: токен бота (лучше отдельного) и чат, затем *Отправить тест*. Чтобы закрывать и глушить тревоги из чата, добавьте свой Telegram id в *admins*.
+
+Проверить конфиг из командной строки до добавления:
+
+```sh
+uptimeforge-agent check 'vless://…'                    # рукопожатие, скачивание 128 КБ, IP выхода
+uptimeforge-agent check 'vless://…' --via socks5://…   # как это видно из другой сети
+```
+
+## 🌐 Установка на VPS
+
+Выберите то, что подходит вашему серверу, — каждый вариант лежит в своей папке в [`deploy/`](deploy):
+
+| Вариант | Когда | Как |
+|---|---|---|
+| 🟢 **Caddy** | чистый VPS, порты 80/443 свободны | [`deploy/caddy`](deploy/caddy/docker-compose.yml): HTTPS от Let's Encrypt без лишних настроек |
+| 🔷 **Traefik** | Traefik уже стоит перед вашими сервисами или вам удобны метки | [`deploy/traefik`](deploy/traefik/docker-compose.yml): Let's Encrypt через HTTP-проверку |
+| 🟩 **nginx** | nginx уже есть на сервере | основной `docker-compose.yml` + [`deploy/nginx/uptimeforge.conf`](deploy/nginx/uptimeforge.conf) + `certbot --nginx` |
+| 🐳 **Без прокси** | у вас свой прокси | основной [`docker-compose.yml`](docker-compose.yml) слушает `127.0.0.1:8080` |
+
+Например, с Caddy:
+
+```sh
+mkdir uptimeforge && cd uptimeforge
+curl -fsSLO https://raw.githubusercontent.com/wh3r3ar3you/UptimeForge/main/deploy/caddy/docker-compose.yml
+echo "UF_DOMAIN=status.example.com" > .env
+echo "UF_DB_PASSWORD=$(openssl rand -hex 24)" >> .env
+echo "UF_SETUP_TOKEN=$(openssl rand -hex 16)" >> .env
+docker compose up -d     # затем откройте https://status.example.com
+```
+
+**Советы VPN-операторам**
+- **Держите хаб за пределами страны с фильтрацией** и на отдельном адресе: если адрес хаба начнут фильтровать, агенты внутри страны ослепнут. Агенты сами перебирают другие публичные адреса сервера (`UF_SOURCE_IP` закрепляет один).
+- **1 vCPU и 1 ГБ RAM** хватает на десятки нод; история хранится в PostgreSQL.
+- За CDN или другим прокси добавьте его в `UF_TRUSTED_PROXIES`, чтобы лимит входа и защищённые cookie видели настоящие адреса.
+
+## ⬆️ Обновление и бэкап
+
+```sh
+docker compose pull && docker compose up -d        # обновление: схема мигрирует вперёд при запуске
+docker compose exec postgres pg_dump -U uptimeforge -Fc uptimeforge > uptimeforge.dump   # бэкап
+```
+
+Делайте бэкап перед обновлением: откат на старую версию не поддерживается. В томе `hub-data` только кэши.
+
+## ⚙️ Настройка
+
+Всё настраивается в интерфейсе. Удобнее git? Запустите хаб с `UF_CONFIG=/path/config.yaml`: пробы, проверки и настройки из файла появятся в интерфейсе только для чтения. Пример — [`config.example.yaml`](config.example.yaml).
+
+<details>
+<summary><b>Переменные хаба</b></summary>
+
+| Переменная | По умолчанию | |
+|---|---|---|
+| `UF_DATABASE_URL` | обязательно | PostgreSQL 14+: `postgres://user:password@host:5432/db` |
+| `UF_LISTEN` | `:8080` | адрес для прослушивания |
+| `UF_PUBLIC_URL` | | внешний адрес хаба для ссылок в тревогах и команд установки |
+| `UF_SETUP_TOKEN` | пишется в лог | нужен, чтобы создать первого админа |
+| `UF_ADMIN_TOKEN` | | bearer-токен для скриптов, работающих с API; не короче 32 символов |
+| `UF_METRICS_TOKEN` | | bearer-токен для `/metrics`; без него `/metrics` отвечает только loopback и приватным адресам без прокси между |
+| `UF_TRUSTED_PROXIES` | loopback и приватные сети | IP и CIDR, чьим заголовкам `X-Forwarded-*` верить; `none` — не верить никому |
+| `UF_CONFIG` | | необязательный файл с конфигурацией |
+| `UF_DATA_DIR` | `./data` (`/data` в Docker) | кэши |
+| `UF_AGENTS_DIR` | `/usr/share/uptimeforge/agents` | бинарники агентов для установщиков (в образе есть; без них установщик скачает версию хаба с GitHub Releases) |
+| `UF_LOG_FORMAT` | text | `json` — логи в JSON |
+| `UF_DEBUG` | | задайте, чтобы писать отладочный лог |
+| `TZ` | `UTC` | часовой пояс тревог, тихих часов и недельного отчёта |
+
+Забыли пароль: `docker compose exec hub uptimeforge-hub admin --username admin --password '…'`.
+
+</details>
+
+<details>
+<summary><b>Переменные агента</b></summary>
+
+| Переменная | |
+|---|---|
+| `UF_HUB` | адрес хаба (`https://…`) |
+| `UF_TOKEN` | токен агента из интерфейса |
+| `UF_SOURCE_IP` | закрепить исходящий адрес для связи с хабом; `off` — не перебирать |
+| `UF_METRICS_INTERVAL` | интервал метрик хоста (по умолчанию `15s`, `0` — выключить) |
+| `UF_NIC` | интерфейсы, чей трафик считать (по умолчанию физические) |
+| `UF_DENY_TYPES` | типы проверок, которые агент не выполняет, например `docker,real-browser` |
+| `UF_INSECURE` | `1` разрешает хаб по `http://` не на loopback (токен тогда идёт открытым текстом) |
+| `UF_BROWSER_NO_SANDBOX` | `1` запускает Chromium для проверок `real-browser` без песочницы |
+
+</details>
+
+<details>
+<summary><b>Метрики для Grafana</b></summary>
+
+```sh
+curl -fsSL --create-dirs -o deploy/scrape.yml https://raw.githubusercontent.com/wh3r3ar3you/UptimeForge/main/deploy/scrape.yml
+docker compose --profile metrics up -d
+```
+
+VictoriaMetrics собирает метрики хаба внутри сети compose и слушает `127.0.0.1:8428`; подключите её в Grafana как источник Prometheus.
+
+</details>
+
+## 🧠 Как выносятся вердикты
+
+Проба считает проверку упавшей после N неудач подряд. Пробы без интернета исключаются. Упали все — **лежит**; упали все пробы одного региона и только они — **заблокирован**; иначе — **частично**, и такой сбой выжидает один интервал перед тревогой. Инцидент не «восстанавливается» только потому, что замолчал единственный свидетель, а после рестарта хаб дожидается своих проб. Подробнее — в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## 🛠 Разработка
+
+```sh
+docker compose -f deploy/compose.test.yml up -d   # PostgreSQL
+make demo        # хаб на :8080 с неделей истории, поддельными Remnawave и Telegram — admin / admin12345
+cd web && npm run dev
+make test
+```
+
+См. [CONTRIBUTING.md](CONTRIBUTING.md). Об уязвимостях — [SECURITY.md](SECURITY.md).
+
+## ⭐ Звёзды
+
+Если UptimeForge сэкономил вам бессонную ночь, поставьте звезду — так его находят другие операторы.
+
+<a href="https://star-history.com/#wh3r3ar3you/UptimeForge&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=wh3r3ar3you/UptimeForge&type=Date&theme=dark" />
+    <img alt="Рост звёзд" src="https://api.star-history.com/svg?repos=wh3r3ar3you/UptimeForge&type=Date" width="100%" />
+  </picture>
+</a>
+
+## 📄 Лицензия
+
+[AGPL-3.0](LICENSE). В архивах релиза и образах есть список лицензий встроенного кода (`THIRD_PARTY_LICENSES.csv`). Страна по IP определяется по базе DB-IP IP-to-Country Lite, [IP Geolocation by DB-IP](https://db-ip.com) (CC BY 4.0), хаб скачивает её при первом использовании.

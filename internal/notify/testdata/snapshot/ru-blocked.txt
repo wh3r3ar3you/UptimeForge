@@ -1,0 +1,27 @@
+== Incident
+🟠 <b>Блок в RU</b> · <b>de-node-1 · Reality</b>
+<code>VLESS · de1.example.com:443</code>
+<blockquote expandable>❌ 🇩🇪 probe-1 · таймаут
+❌ 🇳🇱 probe-2 · таймаут
+❌ 🇩🇪 probe-4 · таймаут
+❌ 🇳🇱 probe-5 · таймаут
+✅ 🇷🇺 probe-0 · 12 ms
+✅ 🇷🇺 probe-3 · 12 ms</blockquote>
+💡 Соединение не устанавливается: похоже на блокировку по IP.
+⏱ с 09:00 · 3 ч · <a href="https://hub.example.com/checks/vless">Открыть</a>
+🔕 Заглушено до 13:00 · leo
+== RichIncident
+<h3>🟠 Блок в RU · de-node-1 · Reality</h3><p><code>VLESS · de1.example.com:443</code></p><table bordered striped compact><tr><th>Проба</th><th>Состояние</th></tr><tr><td>🇩🇪 probe-1</td><td>❌ таймаут</td></tr><tr><td>🇳🇱 probe-2</td><td>❌ таймаут</td></tr><tr><td>🇩🇪 probe-4</td><td>❌ таймаут</td></tr><tr><td>🇳🇱 probe-5</td><td>❌ таймаут</td></tr><tr><td>🇷🇺 probe-0</td><td>✅ 12 ms</td></tr><tr><td>🇷🇺 probe-3</td><td>✅ 12 ms</td></tr></table><blockquote>💡 Соединение не устанавливается: похоже на блокировку по IP.</blockquote><footer>⏱ с 09:00 · 3 ч · <a href="https://hub.example.com/checks/vless">Открыть</a></footer><p>🔕 Заглушено до 13:00 · leo</p>
+== EscalatedReply
+⬆️ Стало хуже: 🟠 <b>Блок в RU</b> · de-node-1 · Reality
+== RemindReply
+⏰ Всё ещё 🟠 <b>Блок в RU</b> · de-node-1 · Reality · уже 3 ч
+== Resolved
+🟢 <b>Восстановлено</b> · <b>de-node-1 · Reality</b>
+<code>VLESS · de1.example.com:443</code>
+⏱ 09:00 → 12:00 · 3 ч
+Было: 🟠 Блок в RU · 0 из 0 проб
+== RichResolved
+<h3>🟢 Восстановлено · de-node-1 · Reality</h3><p>⏱ 09:00 → 12:00 · 3 ч</p><p>Было: 🟠 Блок в RU · 0 из 0 проб</p>
+== RichResolved by hand
+<h3>☑️ Закрыто вручную · de-node-1 · Reality</h3><p>⏱ 09:00 → 12:00 · 3 ч</p><p>Было: 🟠 Блок в RU · 0 из 0 проб</p><p>☑️ Закрыл leo · пока не восстановится, тревог по нему не будет</p>

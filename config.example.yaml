@@ -1,0 +1,178 @@
+# UptimeForge provisioning file — OPTIONAL.
+#
+# Everything here can be done in the web UI. Use this file when you want
+# probes, checks or settings kept in git: items defined here show up in the UI
+# as read-only ("from config.yaml"). Start the hub with UF_CONFIG=/path/config.yaml.
+# ${VAR} is substituted from the environment in values (never in comments);
+# `uptimeforge-hub check-config --config this.yaml` needs every one of them set.
+#
+# Server settings are flags/env, not part of this file:
+#   UF_LISTEN (:8080)  UF_DATA_DIR (./data)  UF_PUBLIC_URL  UF_ADMIN_TOKEN
+
+timezone: UTC                 # alerts, quiet hours and the weekly report use it
+lang: en                      # en | ru — language of notifications
+public_url: https://status.example.com   # links in alerts and agent install commands
+region_label: country         # probe label used to tell "blocked in RU" from "down"
+offline_grace: 90s            # agent silent this long -> "probe offline"
+
+# Dead man's switch: the hub pings this URL every minute while its evaluation
+# loop is alive. Create a check at healthchecks.io (or self-hosted) and let it
+# alert you when the pings stop — that is what watches the watcher.
+heartbeat:
+  url: ${UF_HEARTBEAT_URL}
+  interval: 1m
+
+alerts:
+  quiet_hours: "01:00-08:00"  # warnings arrive silently; critical always rings
+  remind_every: 30m           # repeat unacknowledged critical incidents; 0s = off
+
+defaults:
+  interval: 60s
+  timeout: 15s     # xray checks get at least 25s
+  retries: 2       # consecutive failures before a probe counts a check as failing
+
+# A probe "has internet" if any of these answer. If all fail, the probe is
+# excluded from verdicts (no false "blocked") and you get one warning instead.
+# Mixed RU/foreign targets keep whitelist-mode networks counted as online.
+baseline:
+  - type: tcp
+    tcp: {address: "77.88.8.8:53"}
+  - type: tcp
+    tcp: {address: "1.1.1.1:443"}
+
+probes:
+  # Agents: install uptimeforge-agent there and start it with the token. An agent
+  # only reports server metrics until you set "probing: true": then it runs checks too.
+  # Generate tokens with: uptimeforge-hub token
+  - id: ru-home
+    name: Home · RU
+    token: ${UF_TOKEN_HOME}
+    probing: true
+    labels: {country: ru, kind: home, isp: home-isp}
+
+  - id: ru-dc-1
+    name: DC · RU 1
+    token: ${UF_TOKEN_RU1}
+    probing: true
+    labels: {country: ru, kind: dc}
+
+  - id: ru-dc-2
+    name: DC · RU 2
+    token: ${UF_TOKEN_RU2}
+    probing: true
+    labels: {country: ru, kind: dc}
+
+  - id: de-dc
+    name: DC · DE
+    token: ${UF_TOKEN_DE}
+    probing: true
+    labels: {country: de, kind: dc}
+
+  # The hub itself, from its own network (put the hub abroad: free control probe).
+  - id: hub
+    name: Hub · NL
+    local: true
+    labels: {country: nl, kind: dc}
+
+  # Virtual probe: the hub runs checks through an upstream proxy. Any link the
+  # agent understands works: socks5://, http://, vless://, trojan://, ss://, hy2://
+  # e.g. a residential/mobile RU proxy to see what users of that ISP see.
+  # - id: ru-mobile-proxy
+  #   name: Mobile proxy · RU
+  #   via: socks5://${UF_PROXY_USER}:${UF_PROXY_PASS}@1.2.3.4:1080
+  #   labels: {country: ru, kind: mobile, isp: mobile-isp}
+
+checks:
+  # Every config of a canary user, exactly as clients get it. Re-fetched every
+  # `refresh`; each config becomes its own check, named by its remark.
+  - id: canary
+    name: Canary subscription
+    group: VPN nodes
+    type: xray
+    interval: 60s
+    refresh: 10m
+    xray:
+      subscription: ${UF_CANARY_SUB_URL}
+      user_agent: "v2rayN/7.0"     # panels choose the format by User-Agent
+      # filter: "Germany|Netherlands" # regex on config names
+      heavy_every: 5                # every 5th run downloads 128 KB: catches the ~16 KB DPI freeze
+      download_bytes: 131072
+
+  # A single config by link (or `outbound:` with a raw Xray outbound object).
+  - id: de-1-reality
+    name: de-1 · Reality
+    group: VPN nodes
+    type: xray
+    xray:
+      link: ${UF_LINK_DE1}
+      expect_egress: ["203.0.113.0/24"] # alert if traffic exits elsewhere
+
+  # Only from RU probes: whitelist entry nodes are meaningless from abroad.
+  - id: ru-relay-wl
+    name: ru-relay · whitelist
+    group: Whitelist relays
+    type: tcp
+    probes: ["country=ru"]
+    tcp: {address: "relay.example.com:443"}
+
+  # Asks a Telegram DC for resPQ through the proxy: proves the secret is
+  # accepted and the proxy reaches Telegram, not just that the port is open.
+  - id: tg-proxy
+    name: Telegram proxy
+    group: Telegram
+    type: mtproto
+    mtproto:
+      link: ${UF_TG_PROXY_LINK}     # tg://proxy?… or https://t.me/proxy?…; or address + secret
+      # dc: 2
+
+  - id: panel
+    name: Remnawave panel
+    group: Infrastructure
+    type: http
+    probes: ["country=de", "country=nl"]
+    http:
+      url: https://panel.example.com/
+      expect_status: [200, 302]
+
+  - id: sub-page
+    name: Subscription page
+    group: Infrastructure
+    type: http
+    http: {url: "https://sub.example.com/"}
+
+  - id: panel-cert
+    name: Panel certificate
+    group: Infrastructure
+    type: tls
+    interval: 1h
+    severity: warning
+    probes: ["id=hub"]
+    tls: {address: "panel.example.com:443", min_days: 14}
+
+  # DNS spoofing detector: answers must match.
+  - id: dns-sub
+    name: DNS sub.example.com
+    group: Infrastructure
+    type: dns
+    interval: 5m
+    probes: ["country=ru"]
+    dns: {name: sub.example.com, server: "77.88.8.8", expect: "203.0.113.10"}
+
+telegram:
+  token: ${UF_TG_TOKEN}       # a dedicated bot: buttons need getUpdates
+  chat_id: ${UF_TG_CHAT}      # group/supergroup id, e.g. -1001234567890
+  # Forum topics by severity (message_thread_id); "default" for the rest.
+  # topics: {critical: 2, warning: 3, default: 4}
+  admins: []                  # Telegram user ids allowed to resolve and mute from the chat; empty = acknowledge only
+  # proxy: socks5://127.0.0.1:1080  # if the hub can't reach api.telegram.org directly
+
+# Every incident as JSON (Discord/Slack bridges, n8n, your own bot).
+# webhook:
+#   url: https://example.com/hooks/uptimeforge
+#   headers: {Authorization: "Bearer ${UF_WEBHOOK_TOKEN}"}
+
+# Remnawave panel: nodes, users online and traffic in the UI; alerts say how
+# many users sit on the affected node. A read-only API token is enough.
+# remnawave:
+#   url: https://panel.example.com
+#   token: ${UF_REMNAWAVE_TOKEN}

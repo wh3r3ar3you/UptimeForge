@@ -1,0 +1,535 @@
+/* Windows has no flag emoji: browsers there draw letters instead of flags. This
+   font (Twemoji Country Flags, CC-BY 4.0) covers only the flag code points. */
+@font-face {
+  font-family: 'Twemoji Country Flags';
+  src: url('/fonts/TwemojiCountryFlags.woff2') format('woff2');
+  unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E0063, U+E0065, U+E0067, U+E006C, U+E006E, U+E0073-E0074, U+E0077, U+E007F;
+  font-display: swap;
+}
+
+:root {
+  --uf-track: rgba(134, 147, 163, 0.18);
+  --uf-glow: color-mix(in srgb, var(--mantine-primary-color-filled) 35%, transparent);
+}
+
+/* Numbers line up in columns whatever the font. */
+body {
+  font-variant-numeric: tabular-nums;
+}
+
+[data-mantine-color-scheme='dark'] body {
+  background:
+    radial-gradient(1200px 600px at 100% -10%, color-mix(in srgb, var(--mantine-primary-color-filled) 6%, transparent), transparent 60%),
+    var(--mantine-color-dark-7);
+  background-attachment: fixed;
+}
+
+[data-mantine-color-scheme='light'] body {
+  background: var(--uf-bg);
+}
+
+.uf-card {
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+
+.uf-card:hover {
+  border-color: light-dark(var(--mantine-color-gray-4), var(--mantine-color-dark-3));
+}
+
+.uf-icon-tile {
+  width: 44px;
+  height: 44px;
+  flex: none;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  color: var(--tint);
+  background: color-mix(in srgb, var(--tint) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--tint) 28%, transparent);
+}
+
+.uf-pulse {
+  position: relative;
+}
+
+.uf-pulse::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 2px solid var(--uf-pulse);
+  opacity: 0;
+  animation: uf-pulse 2.4s ease-out infinite;
+}
+
+@keyframes uf-pulse {
+  0% { transform: scale(0.6); opacity: 0.6; }
+  80%, 100% { transform: scale(1.6); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .uf-pulse::after { animation: none; }
+}
+
+.uf-copy {
+  border: 1px solid light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
+  border-radius: var(--mantine-radius-md);
+  background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-8));
+}
+
+/* Sidebar */
+.uf-nav-section {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--mantine-color-dimmed);
+  padding: 0 12px;
+  margin: 18px 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.uf-nav-section::before {
+  content: '';
+  width: 3px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--mantine-primary-color-filled);
+}
+
+.uf-nav-link {
+  border-radius: 10px;
+  margin: 2px 0;
+  border: 1px solid transparent;
+  font-weight: 500;
+}
+
+.uf-nav-link[data-active] {
+  border-color: color-mix(in srgb, var(--mantine-primary-color-filled) 55%, transparent);
+  background: color-mix(in srgb, var(--mantine-primary-color-filled) 12%, transparent);
+  box-shadow: 0 0 18px -6px var(--uf-glow), inset 0 0 0 1px color-mix(in srgb, var(--mantine-primary-color-filled) 10%, transparent);
+  color: var(--mantine-primary-color-light-color);
+}
+
+.uf-logo {
+  font-weight: 800;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+  background: linear-gradient(90deg, #2ee6c4, #2a8cf0);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Tables */
+.uf-table tbody tr {
+  transition: background 100ms ease;
+}
+
+.uf-table tbody tr[data-clickable] {
+  cursor: pointer;
+}
+
+.uf-table tbody tr[data-clickable]:hover {
+  background: light-dark(var(--mantine-color-gray-0), rgba(255, 255, 255, 0.025));
+}
+
+.uf-num {
+  font-family: var(--mantine-font-family-monospace);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Dashboard summary strip: the 1px gap draws the lines between cells at any column count */
+.uf-summary {
+  gap: 1px;
+  background: var(--mantine-color-default-border);
+}
+
+.uf-summary-cell {
+  display: block;
+  padding: 10px 16px;
+  min-width: 0;
+  background: var(--mantine-color-body);
+  transition: background 100ms ease;
+}
+
+.uf-summary-cell:hover {
+  background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-5));
+}
+
+.uf-incident {
+  box-shadow: inset 3px 0 0 var(--uf-kind);
+}
+
+.uf-incident + .uf-incident {
+  border-top: 1px solid var(--mantine-color-default-border);
+}
+
+/* Config checker results */
+.uf-matrix {
+  display: grid;
+  gap: 3px;
+  align-items: center;
+}
+
+.uf-cell {
+  height: 26px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-family: var(--mantine-font-family-monospace);
+  color: #fff;
+  cursor: default;
+  transition: transform 80ms ease, filter 80ms ease;
+}
+
+.uf-cell:hover {
+  filter: brightness(1.15);
+  transform: scale(1.04);
+}
+
+.uf-scroll-x {
+  overflow-x: auto;
+}
+
+/* Chart legend table: last / min / avg / max, Zabbix-style */
+.uf-legend-head,
+.uf-legend-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(4, minmax(64px, auto));
+  gap: 2px 14px;
+  align-items: center;
+  padding: 2px 6px;
+}
+
+.uf-legend-row {
+  width: 100%;
+  border-radius: 6px;
+  transition: background 80ms ease, opacity 80ms ease;
+}
+
+.uf-legend-row:hover {
+  background: light-dark(var(--mantine-color-gray-0), rgba(255, 255, 255, 0.04));
+}
+
+.uf-legend-row[data-off] {
+  opacity: 0.38;
+}
+
+.uf-swatch {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 4px;
+  border-radius: 2px;
+}
+
+@media (max-width: 36em) {
+  .uf-legend-head,
+  .uf-legend-row {
+    grid-template-columns: minmax(0, 1fr) repeat(4, minmax(48px, auto));
+    gap: 2px 8px;
+  }
+}
+
+/* Server threshold rules */
+.uf-rules {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px 140px;
+  gap: 10px 16px;
+  align-items: center;
+}
+
+.uf-rules-row {
+  display: contents;
+}
+
+.uf-rules-row[data-off] .mantine-Switch-label {
+  opacity: 0.55;
+}
+
+@media (max-width: 40em) {
+  .uf-rules {
+    grid-template-columns: minmax(0, 1fr) 1fr;
+  }
+  .uf-rules-head { display: none; }
+  .uf-rules-row > :first-child { grid-column: 1 / -1; }
+}
+
+/* Systems table (dashboard), after Beszel */
+.uf-systems-card {
+  border-radius: var(--mantine-radius-lg);
+  border: 1px solid var(--mantine-color-default-border);
+  background: light-dark(var(--mantine-color-body), var(--mantine-color-dark-6));
+}
+
+.uf-sys {
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.uf-sys th {
+  position: relative;
+  height: 52px;
+  padding: 0 10px;
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 1px solid var(--mantine-color-default-border);
+  background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-7));
+  white-space: nowrap;
+}
+
+.uf-sys th:first-child { border-top-left-radius: 10px; }
+.uf-sys th:last-child { border-top-right-radius: 10px; }
+
+.uf-sys-th {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  color: var(--mantine-color-text);
+}
+
+.uf-sys-sort { display: none; opacity: 0.4; }
+.uf-sys-sort[data-active] { display: block; opacity: 1; }
+.uf-sys th:hover .uf-sys-sort { display: block; }
+
+.uf-sys-resize {
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  right: 0;
+  width: 9px;
+  cursor: col-resize;
+  border-right: 2px solid transparent;
+  touch-action: none;
+}
+
+.uf-sys th:hover .uf-sys-resize { border-right-color: var(--mantine-color-default-border); }
+.uf-sys-resize:hover, .uf-sys-resize:active { border-right-color: var(--mantine-primary-color-filled) !important; }
+
+.uf-sys td {
+  height: var(--uf-row);
+  padding: 0 10px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--mantine-color-default-border);
+}
+
+.uf-sys tbody tr { cursor: pointer; transition: background 100ms ease; }
+.uf-sys tbody tr:last-child td { border-bottom: 0; }
+.uf-sys tbody tr:hover { background: light-dark(var(--mantine-color-gray-0), rgba(255, 255, 255, 0.03)); }
+.uf-sys tbody tr[data-state='offline'], .uf-sys tbody tr[data-state='problem'] { background: color-mix(in srgb, #d03b3b 7%, transparent); }
+.uf-sys tbody tr[data-state='warn'] { background: color-mix(in srgb, #fab219 6%, transparent); }
+.uf-sys tbody tr[data-state='offline'] td:first-child, .uf-sys tbody tr[data-state='problem'] td:first-child { box-shadow: inset 3px 0 0 #d03b3b; }
+.uf-sys tbody tr[data-state='warn'] td:first-child { box-shadow: inset 3px 0 0 #fab219; }
+
+/* The View menu */
+.uf-view-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+}
+/* Three columns need ~520px: on a phone they stack and the menu scrolls instead of running off the screen. */
+@media (max-width: 36em) {
+  .uf-view { flex-direction: column; align-items: stretch !important; max-height: 70vh; overflow-y: auto; width: calc(100vw - 32px); }
+  .uf-view > .mantine-Divider-root[data-orientation='vertical'] { display: none; }
+  .uf-view > * + * { border-top: 1px solid var(--mantine-color-default-border); }
+  .uf-view .mantine-ScrollArea-root { max-height: none !important; }
+}
+.uf-view-item:hover { background: light-dark(var(--mantine-color-gray-0), rgba(255, 255, 255, 0.05)); }
+.uf-view-item[data-active] { font-weight: 600; }
+
+/* Theme tiles */
+.uf-theme { border-radius: 12px; padding: 4px; border: 2px solid transparent; transition: border-color 100ms ease; }
+.uf-theme:hover { border-color: var(--mantine-color-default-border); }
+.uf-theme[data-active] { border-color: var(--mantine-primary-color-filled); }
+
+/* Thin summary strip */
+.uf-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  border-radius: var(--mantine-radius-lg);
+  border: 1px solid var(--mantine-color-default-border);
+  background: light-dark(var(--mantine-color-body), var(--mantine-color-dark-6));
+  overflow: hidden;
+}
+.uf-strip-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  flex: 1 1 180px;
+  min-width: 0;
+  border-right: 1px solid var(--mantine-color-default-border);
+  transition: background 100ms ease;
+}
+.uf-strip-cell:last-child { border-right: 0; }
+.uf-strip-cell:hover { background: light-dark(var(--mantine-color-gray-0), rgba(255, 255, 255, 0.03)); }
+
+/* Remnawave hero (top of the dashboard): three cells, the users-online one wider.
+   Lines between cells come from borders, so the card reads as one object. */
+.uf-rw-hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr);
+  border-radius: var(--mantine-radius-lg);
+  border: 1px solid var(--mantine-color-default-border);
+  background: light-dark(var(--mantine-color-body), var(--mantine-color-dark-6));
+  color: var(--mantine-color-text);
+  overflow: hidden;
+  transition: border-color 120ms ease;
+}
+.uf-rw-hero:hover { border-color: color-mix(in srgb, var(--mantine-primary-color-filled) 45%, var(--mantine-color-default-border)); }
+.uf-rw-hero-empty { display: block; padding: 12px 18px; }
+.uf-rw-cell { padding: 14px 20px 16px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.uf-rw-cell + .uf-rw-cell { border-left: 1px solid var(--mantine-color-default-border); }
+.uf-rw-label {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--mantine-color-dimmed); white-space: nowrap;
+}
+.uf-rw-label > span { overflow: hidden; text-overflow: ellipsis; }
+.uf-rw-dot { opacity: 0.6; }
+.uf-rw-go { margin-left: auto; flex: none; opacity: 0.45; transition: opacity 120ms ease, transform 120ms ease; }
+.uf-rw-hero:hover .uf-rw-go { opacity: 1; transform: translateX(2px); }
+.uf-rw-main-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; min-width: 0; }
+.uf-rw-big {
+  font-size: clamp(30px, 3.4vw, 40px); font-weight: 750; line-height: 1.05; letter-spacing: -0.025em;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.uf-rw-value {
+  margin-top: 4px; font-size: clamp(20px, 2vw, 24px); font-weight: 700; line-height: 1.15; letter-spacing: -0.015em;
+  font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.uf-rw-of { font-size: 0.7em; font-weight: 600; color: var(--mantine-color-dimmed); margin-left: 1px; }
+.uf-rw-sub {
+  display: flex; flex-wrap: wrap; align-items: center; column-gap: 6px; row-gap: 2px;
+  font-size: 12.5px; line-height: 1.35; color: var(--mantine-color-dimmed); font-variant-numeric: tabular-nums; min-width: 0;
+}
+.uf-rw-delta { display: inline-flex; align-items: center; gap: 2px; color: var(--mantine-color-text); font-weight: 600; }
+.uf-rw-sep { opacity: 0.6; }
+.uf-rw-spark { flex: none; display: block; margin-bottom: 4px; }
+.uf-rw-stale {
+  grid-column: 1 / -1; padding: 6px 20px; font-size: 12px; color: var(--mantine-color-dimmed);
+  border-top: 1px solid var(--mantine-color-default-border);
+}
+
+/* Tablet: tighter cells. */
+@media (max-width: 62em) {
+  .uf-rw-hero { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1fr); }
+  .uf-rw-cell { padding: 12px 16px 14px; }
+}
+/* Phone: users online across the top, nodes and traffic side by side below. */
+@media (max-width: 36em) {
+  .uf-rw-hero { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .uf-rw-main { grid-column: 1 / -1; }
+  .uf-rw-cell + .uf-rw-cell { border-left: 0; border-top: 1px solid var(--mantine-color-default-border); }
+  .uf-rw-main + .uf-rw-cell + .uf-rw-cell { border-left: 1px solid var(--mantine-color-default-border); }
+  .uf-rw-spark { width: 104px; height: 34px; }
+}
+
+/* Usage bars (the systems table), one look per user's pick */
+.uf-bar {
+  flex: 1;
+  min-width: 28px;
+  max-width: 72px;
+  height: 14px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--c) 16%, transparent);
+}
+.uf-bar > span {
+  display: block;
+  height: 100%;
+  width: var(--v);
+  min-width: 2px;
+  border-radius: inherit;
+  background: var(--c);
+}
+.uf-bar[data-kind='line'] { height: 8px; max-width: 90px; }
+.uf-bar[data-kind='thin'] { height: 3px; max-width: 90px; }
+.uf-bar[data-kind='gradient'] { height: 10px; max-width: 90px; background: color-mix(in srgb, var(--mantine-color-text) 10%, transparent); }
+.uf-bar[data-kind='gradient'] > span {
+  background: linear-gradient(90deg, #0ca30c 0%, #0ca30c 55%, #fab219 78%, #d03b3b 100%);
+  background-size: calc(100% * 100 / var(--pct, 50)) 100%;
+}
+.uf-bar-seg { display: flex; gap: 2px; flex: none; }
+.uf-bar-seg > span { width: 5px; height: 14px; border-radius: 2px; background: color-mix(in srgb, var(--c) 16%, transparent); }
+.uf-bar-seg > span[data-on] { background: var(--c); }
+
+/* Moving columns */
+.uf-sys-th[data-movable] { cursor: grab; touch-action: none; user-select: none; }
+.uf-sys th[data-moving] { opacity: 0.45; }
+.uf-sys th[data-drop='before'] { box-shadow: inset 2px 0 0 var(--mantine-primary-color-filled); }
+.uf-sys th[data-drop='after'] { box-shadow: inset -2px 0 0 var(--mantine-primary-color-filled); }
+
+.uf-font-tile { padding: 10px 12px; border-color: var(--mantine-color-default-border); }
+
+/* The system cell: a big flag, the name, and where it is and what it runs */
+.uf-sys-flag { font-size: 24px; line-height: 1; flex: none; }
+.uf-sys-name { font-size: 17px; font-weight: 700; line-height: 1.25; letter-spacing: -0.01em; }
+.uf-sys-sub { font-size: 12.5px; line-height: 1.3; margin-top: 2px; }
+.uf-sys[data-density='compact'] .uf-sys-flag { font-size: 20px; }
+.uf-sys[data-density='compact'] .uf-sys-name { font-size: 15px; }
+.uf-sys[data-density='comfortable'] .uf-sys-flag { font-size: 28px; }
+.uf-sys[data-density='comfortable'] .uf-sys-name { font-size: 18px; }
+
+/* Checks page: group cards, rows, pulse bars, tiles, the bulk bar */
+.uf-check-group { border: 1px solid var(--mantine-color-default-border); border-radius: var(--mantine-radius-lg); overflow: hidden;
+  background: light-dark(var(--mantine-color-body), var(--mantine-color-dark-6)); }
+.uf-check-group[data-problems] { border-color: color-mix(in srgb, #d03b3b 45%, var(--mantine-color-default-border)); }
+.uf-check-group-bar { display: flex; align-items: center; min-width: 0; background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-7)); }
+.uf-check-group-head { display: flex; align-items: center; gap: 10px; flex: 1; width: 100%; padding: 12px 16px; min-width: 0; }
+.uf-check-group-bar > .mantine-Checkbox-root + .uf-check-group-head { padding-left: 12px; }
+.uf-check-group-head:hover { background: light-dark(var(--mantine-color-gray-1), rgba(255, 255, 255, 0.04)); }
+.uf-check-row { display: grid; grid-template-columns: 22px 16px minmax(0, 1fr) auto 72px 64px 34px; gap: 12px; align-items: center;
+  padding: 9px 16px; border-top: 1px solid var(--mantine-color-default-border); cursor: pointer; transition: background 100ms ease; }
+.uf-check-row:hover { background: light-dark(var(--mantine-color-gray-0), rgba(255, 255, 255, 0.03)); }
+.uf-check-row[data-problem] { background: color-mix(in srgb, #d03b3b 6%, transparent); box-shadow: inset 3px 0 0 #d03b3b; }
+.uf-check-row[data-paused] { opacity: 0.6; }
+.uf-pulse-bar { display: flex; gap: 2px; align-items: center; }
+.uf-pulse-bar > span { width: 4px; height: 18px; border-radius: 2px; flex: none; transition: transform 80ms ease; }
+.uf-pulse-bar > span:hover { transform: scaleY(1.25); }
+.uf-pulse-bar[data-compact] > span { width: 3px; height: 12px; }
+.uf-check-tile { display: block; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--mantine-color-default-border);
+  background: light-dark(var(--mantine-color-body), var(--mantine-color-dark-7)); min-width: 0; }
+.uf-check-tile[data-problem] { border-color: #d03b3b; }
+.uf-check-tile .uf-pulse-bar { overflow: hidden; }
+.uf-bulk-bar { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 200; max-width: calc(100vw - 32px); }
+/* The pulse bar shows from md (62em), the latency from sm (48em): one column per visible item. */
+@media (max-width: 62em) {
+  .uf-check-row { grid-template-columns: 22px 16px minmax(0, 1fr) 72px 64px 34px; }
+}
+@media (max-width: 48em) {
+  .uf-check-row { grid-template-columns: 22px 16px minmax(0, 1fr) 72px 34px; gap: 10px; padding: 9px 12px; }
+}
+
+/* Rows that open a page on click are reachable with the keyboard too. */
+.uf-check-row:focus-visible,
+.uf-sys tbody tr:focus-visible,
+.uf-table tbody tr[data-clickable]:focus-visible,
+.uf-rw-hero:focus-visible {
+  outline: 2px solid var(--mantine-primary-color-filled);
+  outline-offset: -2px;
+}
+
+/* Template editor: the preview looks like a Telegram message */
+.uf-tg-preview { padding: 12px 14px; border-radius: 14px; background: light-dark(#eef6ff, #1f2c3a); line-height: 1.5; font-size: 14px; word-break: break-word; }
+.uf-loc-row { padding: 6px 8px; border-radius: 10px; border: 1px solid var(--mantine-color-default-border); }
+.uf-loc-row[data-off] { opacity: 0.55; }
+.uf-tg-preview h3 { font-size: 16px; margin: 0 0 6px; }
+.uf-tg-preview p { margin: 4px 0; }
+.uf-tg-preview table { border-collapse: collapse; margin: 6px 0; font-size: 13px; }
+.uf-tg-preview td, .uf-tg-preview th { border: 1px solid var(--mantine-color-default-border); padding: 3px 8px; }
+.uf-tg-preview blockquote { margin: 6px 0; padding: 4px 10px; border-left: 3px solid var(--mantine-primary-color-filled); background: color-mix(in srgb, var(--mantine-primary-color-filled) 8%, transparent); }
+.uf-tg-preview footer { margin-top: 6px; font-size: 12.5px; opacity: 0.8; }
+.uf-tg-preview pre, .uf-tg-preview code { font-family: var(--mantine-font-family-monospace); font-size: 12px; }
+@media (max-width: 75em) { .uf-templates { grid-template-columns: 1fr !important; } }

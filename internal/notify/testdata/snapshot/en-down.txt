@@ -1,0 +1,26 @@
+== Incident
+🔴 <b>Down</b> · <b>Сайт a&lt;b &amp; c&gt;</b>
+<code>https://example.com/</code>
+<blockquote expandable>❌ 🇩🇪 probe-1 · timeout
+❌ 🇳🇱 probe-2 · timeout
+✅ 🇷🇺 probe-0 · 12 ms
+✅ 🇷🇺 probe-3 · 12 ms</blockquote>
+🔗 Checks affected: 2 — cfg-1, a&lt;b &amp; c&gt;
+⏱ since 09:00 · 3 h · 👥 120 online · <a href="https://hub.example.com/checks/web">Open</a>
+✅ Acknowledged by a&lt;b &amp; c&gt;
+== RichIncident
+<h3>🔴 Down · Сайт a&lt;b &amp; c&gt;</h3><p><code>https://example.com/</code></p><table bordered striped compact><tr><th>Probe</th><th>State</th></tr><tr><td>🇩🇪 probe-1</td><td>❌ timeout</td></tr><tr><td>🇳🇱 probe-2</td><td>❌ timeout</td></tr><tr><td>🇷🇺 probe-0</td><td>✅ 12 ms</td></tr><tr><td>🇷🇺 probe-3</td><td>✅ 12 ms</td></tr></table><p>🔗 Checks affected: 2 — cfg-1, a&lt;b &amp; c&gt;</p><footer>⏱ since 09:00 · 3 h · 👥 120 online · <a href="https://hub.example.com/checks/web">Open</a></footer><p>✅ Acknowledged by a&lt;b &amp; c&gt;</p>
+== EscalatedReply
+⬆️ Got worse: 🔴 <b>Down</b> · Сайт a&lt;b &amp; c&gt;
+== RemindReply
+⏰ Still 🔴 <b>Down</b> · Сайт a&lt;b &amp; c&gt; · for 3 h
+== Resolved
+🟢 <b>Recovered</b> · <b>Сайт a&lt;b &amp; c&gt;</b>
+<code>https://example.com/</code>
+⏱ 09:00 → 12:00 · 3 h · 👥 up to 120 were online
+Was: 🔴 Down · 0 of 0 probes
+✅ Acknowledged by a&lt;b &amp; c&gt;
+== RichResolved
+<h3>🟢 Recovered · Сайт a&lt;b &amp; c&gt;</h3><p>⏱ 09:00 → 12:00 · 3 h · 👥 up to 120 were online</p><p>Was: 🔴 Down · 0 of 0 probes</p><p>✅ Acknowledged by a&lt;b &amp; c&gt;</p>
+== RichResolved by hand
+<h3>☑️ Closed by hand · Сайт a&lt;b &amp; c&gt;</h3><p>⏱ 09:00 → 12:00 · 3 h · 👥 up to 120 were online</p><p>Was: 🔴 Down · 0 of 0 probes</p><p>☑️ Closed by leo · no alerts for it until it recovers</p><p>✅ Acknowledged by a&lt;b &amp; c&gt;</p>

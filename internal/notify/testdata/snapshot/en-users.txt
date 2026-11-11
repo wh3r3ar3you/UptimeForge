@@ -1,0 +1,20 @@
+== Incident
+📉 <b>Users gone</b> · <b>🇵🇱 pl-node-1</b>
+
+Was <b>812</b> → now <b>39</b>
+💡 The node lost the panel, and its clients went with it.
+⏱ since 09:00 · 3 h · <a href="https://hub.example.com/remnawave">Open</a>
+== RichIncident
+<h3>📉 Users gone · 🇵🇱 pl-node-1</h3><p>Was <b>812</b> → now <b>39</b></p><blockquote>💡 The node lost the panel, and its clients went with it.</blockquote><footer>⏱ since 09:00 · 3 h · <a href="https://hub.example.com/remnawave">Open</a></footer>
+== EscalatedReply
+⬆️ Got worse: 📉 <b>Users gone</b> · pl-node-1
+== RemindReply
+⏰ Still 📉 <b>Users gone</b> · pl-node-1 · for 3 h
+== Resolved
+🟢 <b>Recovered</b> · <b>🇵🇱 pl-node-1</b>
+⏱ 09:00 → 12:00 · 3 h
+Was: 📉 Users gone · low of 21 from 812
+== RichResolved
+<h3>🟢 Recovered · 🇵🇱 pl-node-1</h3><p>⏱ 09:00 → 12:00 · 3 h</p><p>Was: 📉 Users gone · low of 21 from 812</p>
+== RichResolved by hand
+<h3>☑️ Closed by hand · 🇵🇱 pl-node-1</h3><p>⏱ 09:00 → 12:00 · 3 h</p><p>Was: 📉 Users gone · low of 21 from 812</p><p>☑️ Closed by leo · no alerts for it until it recovers</p>

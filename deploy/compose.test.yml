@@ -1,0 +1,15 @@
+# A throwaway PostgreSQL for go test. Data lives in memory and dies with the container.
+#   docker compose -f deploy/compose.test.yml up -d
+#   export UF_TEST_DATABASE_URL=postgres://uf:uf@127.0.0.1:55432/uf
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: uf
+      POSTGRES_PASSWORD: uf
+      POSTGRES_DB: uf
+    command: [postgres, -c, fsync=off, -c, synchronous_commit=off, -c, full_page_writes=off, -c, max_connections=300]
+    tmpfs:
+      - /var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:55432:5432"

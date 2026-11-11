@@ -1,0 +1,16 @@
+.git
+.github
+.claude
+.superpowers
+.env
+.env.*
+config.yaml
+dist
+data
+bin
+demo-data
+docs
+web/node_modules
+web/dist
+*.md
+!README.md

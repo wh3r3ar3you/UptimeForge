@@ -1,0 +1,20 @@
+== Incident
+🛰 <b>No internet</b> · <b>Дом</b>
+
+<code>dial tcp: i/o timeout</code>
+💡 The probe lost internet, its checks do not count.
+⏱ since 09:00 · 3 h · <a href="https://hub.example.com/probes/p">Open</a>
+== RichIncident
+<h3>🛰 No internet · Дом</h3><pre>dial tcp: i/o timeout</pre><blockquote>💡 The probe lost internet, its checks do not count.</blockquote><footer>⏱ since 09:00 · 3 h · <a href="https://hub.example.com/probes/p">Open</a></footer>
+== EscalatedReply
+⬆️ Got worse: 🛰 <b>No internet</b> · Дом
+== RemindReply
+⏰ Still 🛰 <b>No internet</b> · Дом · for 3 h
+== Resolved
+🟢 <b>Recovered</b> · <b>Дом</b>
+⏱ 09:00 → 12:00 · 3 h
+Was: 🛰 No internet · 3 h
+== RichResolved
+<h3>🟢 Recovered · Дом</h3><p>⏱ 09:00 → 12:00 · 3 h</p><p>Was: 🛰 No internet · 3 h</p>
+== RichResolved by hand
+<h3>☑️ Closed by hand · Дом</h3><p>⏱ 09:00 → 12:00 · 3 h</p><p>Was: 🛰 No internet · 3 h</p><p>☑️ Closed by leo · no alerts for it until it recovers</p>

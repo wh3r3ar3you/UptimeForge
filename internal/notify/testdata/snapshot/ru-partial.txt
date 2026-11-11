@@ -1,0 +1,34 @@
+== Incident
+🟡 <b>Частично</b> · <b>big</b>
+<blockquote expandable>❌ 🇩🇪 probe-1 · таймаут
+❌ 🇳🇱 probe-2 · таймаут
+❌ 🇩🇪 probe-4 · таймаут
+❌ 🇳🇱 probe-5 · таймаут
+❌ 🇩🇪 probe-7 · таймаут
+❌ 🇳🇱 probe-8 · таймаут
+❌ 🇩🇪 probe-10 · таймаут
+❌ 🇳🇱 probe-11 · таймаут
+❌ 🇩🇪 probe-13 · таймаут
+❌ 🇳🇱 probe-14 · таймаут
+✅ 🇷🇺 probe-0 · 12 ms
+✅ 🇷🇺 probe-3 · 12 ms
+✅ 🇷🇺 probe-6 · 12 ms
+✅ 🇷🇺 probe-9 · 12 ms
+✅ 🇷🇺 probe-12 · 12 ms
+… и ещё 5</blockquote>
+💡 Соединение не устанавливается: похоже на блокировку по IP.
+⏱ с 09:00 · 3 ч · <a href="https://hub.example.com/checks/big">Открыть</a>
+== RichIncident
+<h3>🟡 Частично · big</h3><details><summary>13 из 20 проб</summary><table bordered striped compact><tr><th>Проба</th><th>Состояние</th></tr><tr><td>🇩🇪 probe-1</td><td>❌ таймаут</td></tr><tr><td>🇳🇱 probe-2</td><td>❌ таймаут</td></tr><tr><td>🇩🇪 probe-4</td><td>❌ таймаут</td></tr><tr><td>🇳🇱 probe-5</td><td>❌ таймаут</td></tr><tr><td>🇩🇪 probe-7</td><td>❌ таймаут</td></tr><tr><td>🇳🇱 probe-8</td><td>❌ таймаут</td></tr><tr><td>🇩🇪 probe-10</td><td>❌ таймаут</td></tr><tr><td>🇳🇱 probe-11</td><td>❌ таймаут</td></tr><tr><td>🇩🇪 probe-13</td><td>❌ таймаут</td></tr><tr><td>🇳🇱 probe-14</td><td>❌ таймаут</td></tr><tr><td>🇩🇪 probe-16</td><td>❌ таймаут</td></tr><tr><td>🇳🇱 probe-17</td><td>❌ таймаут</td></tr><tr><td>🇩🇪 probe-19</td><td>❌ таймаут</td></tr><tr><td>🇷🇺 probe-0</td><td>✅ 12 ms</td></tr><tr><td>🇷🇺 probe-3</td><td>✅ 12 ms</td></tr><tr><td colspan="2">… и ещё 5</td></tr></table></details><blockquote>💡 Соединение не устанавливается: похоже на блокировку по IP.</blockquote><footer>⏱ с 09:00 · 3 ч · <a href="https://hub.example.com/checks/big">Открыть</a></footer>
+== EscalatedReply
+⬆️ Стало хуже: 🟡 <b>Частично</b> · big
+== RemindReply
+⏰ Всё ещё 🟡 <b>Частично</b> · big · уже 3 ч
+== Resolved
+🟢 <b>Восстановлено</b> · <b>big</b>
+⏱ 09:00 → 12:00 · 3 ч
+Было: 🟡 Частично · 0 из 0 проб
+== RichResolved
+<h3>🟢 Восстановлено · big</h3><p>⏱ 09:00 → 12:00 · 3 ч</p><p>Было: 🟡 Частично · 0 из 0 проб</p>
+== RichResolved by hand
+<h3>☑️ Закрыто вручную · big</h3><p>⏱ 09:00 → 12:00 · 3 ч</p><p>Было: 🟡 Частично · 0 из 0 проб</p><p>☑️ Закрыл leo · пока не восстановится, тревог по нему не будет</p>
