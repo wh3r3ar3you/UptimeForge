@@ -131,6 +131,9 @@ func TestBrowserReal(t *testing.T) {
 	if findChromium() == "" {
 		t.Skip("no Chromium here")
 	}
+	// This tests the check, not the host: CI runners (Ubuntu with AppArmor
+	// restricting user namespaces) cannot give Chromium its sandbox.
+	t.Setenv("UF_BROWSER_NO_SANDBOX", "1")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/gone" {
 			w.WriteHeader(404)
