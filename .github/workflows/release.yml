@@ -31,6 +31,9 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A stable tag may sit on the same commit as its release candidate:
+          # release this tag, not whichever one git sorts first.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
 
   images:
     needs: test
