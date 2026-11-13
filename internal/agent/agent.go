@@ -5,9 +5,11 @@ package agent
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand/v2"
 	"net"
@@ -26,6 +28,7 @@ import (
 	"github.com/wh3r3ar3you/uptimeforge/internal/proto"
 	"github.com/wh3r3ar3you/uptimeforge/internal/runner"
 	"github.com/wh3r3ar3you/uptimeforge/internal/sysmon"
+	"github.com/wh3r3ar3you/uptimeforge/internal/update"
 	"github.com/wh3r3ar3you/uptimeforge/internal/version"
 )
 
@@ -57,7 +60,19 @@ type Config struct {
 	// DenyTypes are check types this probe refuses to run, whatever the hub
 	// assigns (e.g. docker, real-browser, system-service).
 	DenyTypes []string
+	// StateDir keeps the token, installed updates and the connected marker.
+	StateDir string
+	// Launcher is set when the agent runs under `uptimeforge-agent launch`
+	// (UF_LAUNCHER=1): only then does it install updates the hub pushes and
+	// mark its version connected.
+	Launcher bool
+	// UpdateKeys verify updates; nil means update.ReleaseKeys. A test hook.
+	UpdateKeys []ed25519.PublicKey
 }
+
+// ErrRestart is returned by Run after an update was installed: the process
+// exits with update.ExitRestart and the launcher starts the new version.
+var ErrRestart = errors.New("update installed, restart into it")
 
 type Agent struct {
 	cfg    Config
@@ -85,6 +100,11 @@ type Agent struct {
 	srcAt int
 	srcOK string // last address the hub was reached from, for the log
 	local func() []string
+
+	updating    atomic.Bool   // an update is being installed (or was, and the restart is due)
+	marked      atomic.Bool   // connected marker written
+	restart     chan struct{} // closed once an update is installed
+	restartOnce sync.Once
 }
 
 type sample struct {
@@ -96,7 +116,7 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) *Agent {
 	if cfg.MetricsInterval == 0 {
 		cfg.MetricsInterval = 15 * time.Second
 	}
-	a := &Agent{cfg: cfg, log: log, notify: make(chan struct{}, 1), liveSet: make(chan struct{}, 1), out: make(chan []byte, 16), runs: make(chan struct{}, maxRuns)}
+	a := &Agent{cfg: cfg, log: log, notify: make(chan struct{}, 1), liveSet: make(chan struct{}, 1), out: make(chan []byte, 16), runs: make(chan struct{}, maxRuns), restart: make(chan struct{})}
 	a.runner = runner.New(ctx, log, a.enqueue)
 	a.runner.Deny(cfg.DenyTypes)
 	if cfg.MetricsInterval > 0 {
@@ -262,6 +282,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		if errors.Is(err, ErrRestart) {
+			return ErrRestart
+		}
 		if time.Since(start) > time.Minute {
 			backoff = time.Second
 		}
@@ -273,6 +296,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-a.restart: // installed while the hub was away
+			return ErrRestart
 		case <-time.After(wait):
 		}
 		backoff = min(backoff*2, 30*time.Second)
@@ -284,9 +309,10 @@ func (a *Agent) session(ctx context.Context) error {
 	defer cancel()
 	dialCtx, dialCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer dialCancel()
+	client := a.hubClient() // also fetches updates: same source address
 	conn, resp, err := websocket.Dial(dialCtx, WSURL(a.cfg.HubURL), &websocket.DialOptions{
 		HTTPHeader: http.Header{"Authorization": {"Bearer " + a.cfg.Token}},
-		HTTPClient: a.hubClient(),
+		HTTPClient: client,
 	})
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
@@ -304,6 +330,7 @@ func (a *Agent) session(ctx context.Context) error {
 	host, _ := os.Hostname()
 	hello, _ := proto.Encode(proto.TypeHello, proto.Hello{
 		Proto: proto.Version, Version: version.Version, Hostname: host, OS: runtime.GOOS, Arch: runtime.GOARCH,
+		Launcher: a.cfg.Launcher,
 	})
 	if err := conn.Write(ctx, websocket.MessageText, hello); err != nil {
 		return err
@@ -311,9 +338,13 @@ func (a *Agent) session(ctx context.Context) error {
 	a.log.Info("connected to hub", "url", WSURL(a.cfg.HubURL))
 
 	errc := make(chan error, 2)
-	go func() { errc <- a.readLoop(ctx, conn) }()
+	go func() { errc <- a.readLoop(ctx, conn, client) }()
 	go func() { errc <- a.writeLoop(ctx, conn) }()
-	err = <-errc
+	select {
+	case err = <-errc:
+	case <-a.restart:
+		err = ErrRestart
+	}
 	conn.Close(websocket.StatusNormalClosure, "")
 	return err
 }
@@ -325,7 +356,9 @@ func (a *Agent) sendSysInfo(ctx context.Context, conn *websocket.Conn) error {
 	return conn.Write(ctx, websocket.MessageText, info)
 }
 
-func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
+// readLoop handles the hub's messages; client (nil: Go's default) reaches the
+// hub from the session's source address.
+func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn, client *http.Client) error {
 	sysSent := false
 	for {
 		_, data, err := conn.Read(ctx)
@@ -345,6 +378,7 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			if err := a.runner.Apply(as); err != nil {
 				a.log.Error("upstream proxy for this probe is broken", "err", err)
 			}
+			a.markConnected()
 			off := as.Metrics != nil && !*as.Metrics
 			if was := a.metricsOff.Swap(off); was != off {
 				a.log.Info("host metrics switched by the hub", "off", off)
@@ -371,8 +405,109 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 				continue
 			}
 			a.startRun(ctx, run)
+		case proto.TypeUpdate:
+			var u proto.Update
+			if json.Unmarshal(env.Data, &u) == nil {
+				a.startUpdate(ctx, u.Version, client)
+			}
 		}
 	}
+}
+
+// markConnected tells the launcher this version reached the hub and got
+// work, which keeps it from being rolled back. Once per process.
+func (a *Agent) markConnected() {
+	if !a.cfg.Launcher || a.marked.Load() {
+		return
+	}
+	if err := update.MarkConnected(a.cfg.StateDir, version.Version); err != nil {
+		a.log.Warn("cannot mark this version connected: the launcher may roll it back", "err", err)
+		return
+	}
+	a.marked.Store(true)
+}
+
+// startUpdate installs release v in the background. On success the agent
+// restarts into it (Run returns ErrRestart) and tells the hub nothing; on
+// failure it reports why and keeps running. Only one update runs at a time,
+// and the version already running is not installed again.
+func (a *Agent) startUpdate(ctx context.Context, v string, client *http.Client) {
+	if v == version.Version {
+		return
+	}
+	if !a.cfg.Launcher {
+		a.updateFailed(ctx, v, errors.New("not running under the launcher"))
+		return
+	}
+	if !a.updating.CompareAndSwap(false, true) {
+		return
+	}
+	a.log.Info("installing an update", "version", v)
+	go func() {
+		keys := a.cfg.UpdateKeys
+		if keys == nil {
+			keys = update.ReleaseKeys
+		}
+		ictx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+		defer cancel()
+		err := update.Install(ictx, a.cfg.StateDir, v, runtime.GOOS, update.ReleaseArch(), a.fetcher(ictx, client), keys)
+		if err != nil {
+			a.updating.Store(false)
+			a.log.Warn("update failed", "version", v, "err", err)
+			a.updateFailed(ctx, v, err)
+			return
+		}
+		a.log.Info("update installed, restarting into it", "version", v)
+		a.restartOnce.Do(func() { close(a.restart) })
+	}()
+}
+
+func (a *Agent) updateFailed(ctx context.Context, v string, err error) {
+	msg, _ := proto.Encode(proto.TypeUpdateResult, proto.UpdateResult{Version: v, Error: err.Error()})
+	select {
+	case a.out <- msg:
+	case <-ctx.Done():
+	}
+}
+
+// fetcher downloads release files from the hub's public /download/ (no
+// credentials), capped in size. Errors carry no URL: they go to the hub UI.
+func (a *Agent) fetcher(ctx context.Context, client *http.Client) func(string) ([]byte, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	return func(name string) ([]byte, error) {
+		limit := int64(256 << 20)
+		if strings.HasPrefix(name, "checksums.txt") {
+			limit = 1 << 20
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, DownloadURL(a.cfg.HubURL, name), nil)
+		if err != nil {
+			return nil, plainURLErr(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, plainURLErr(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
+		b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+		if err != nil {
+			return nil, plainURLErr(err)
+		}
+		if int64(len(b)) > limit {
+			return nil, fmt.Errorf("larger than %d bytes", limit)
+		}
+		return b, nil
+	}
+}
+
+// DownloadURL is a file under the hub's /download/, from the same hub
+// address the WebSocket URL is derived from.
+func DownloadURL(hub, name string) string {
+	return strings.TrimSuffix(JoinURL(hub), "/api/agent/join") + "/download/" + name
 }
 
 // maxRuns caps checks run on demand at once: each can start an xray instance.

@@ -3,11 +3,13 @@
 //
 //	uptimeforge-agent --hub https://hub.example.com --token <token>
 //	uptimeforge-agent check 'vless://...'        # one-off check, prints the result
+//	uptimeforge-agent launch --hub ... --token ...  # the agent as an updatable child (signed updates, rollback)
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -21,6 +23,7 @@ import (
 
 	"github.com/wh3r3ar3you/uptimeforge/internal/agent"
 	"github.com/wh3r3ar3you/uptimeforge/internal/checks"
+	"github.com/wh3r3ar3you/uptimeforge/internal/update"
 	"github.com/wh3r3ar3you/uptimeforge/internal/version"
 )
 
@@ -32,25 +35,21 @@ func main() {
 		case "version":
 			fmt.Println(version.Version)
 			return
+		case "launch":
+			os.Exit(launch(os.Args[2:]))
 		}
 	}
 
-	hubURL := flag.String("hub", os.Getenv("UF_HUB"), "hub address, e.g. https://hub.example.com (env UF_HUB)")
-	token := flag.String("token", os.Getenv("UF_TOKEN"), "probe token shown by the hub (env UF_TOKEN)")
-	metrics := flag.Duration("metrics", envDuration("UF_METRICS_INTERVAL", 15*time.Second), "host metrics interval, 0 to disable (env UF_METRICS_INTERVAL)")
-	nics := flag.String("nic", os.Getenv("UF_NIC"), "comma-separated interfaces counted as traffic; default: all physical (env UF_NIC)")
-	src := flag.String("source-ip", os.Getenv("UF_SOURCE_IP"), "local address to reach the hub from; empty tries the host's public addresses in turn when the hub is unreachable, \"off\" never does (env UF_SOURCE_IP)")
-	insecure := flag.Bool("insecure", os.Getenv("UF_INSECURE") == "1", "allow a hub over plain http/ws beyond loopback: the token and checks then cross the network in clear text (env UF_INSECURE=1)")
-	join := flag.String("join", os.Getenv("UF_JOIN"), "one-time invite code from the hub: exchanged for a token that is saved in --state-dir (env UF_JOIN)")
-	stateDir := flag.String("state-dir", envOr("UF_STATE_DIR", agent.DefaultStateDir), "where the token obtained with --join is kept (env UF_STATE_DIR)")
-	deny := flag.String("deny-types", os.Getenv("UF_DENY_TYPES"), "comma-separated check types this probe refuses to run whatever the hub assigns, e.g. docker,real-browser,system-service (env UF_DENY_TYPES)")
+	f := agentFlags(flag.CommandLine)
 	flag.Parse()
+	hubURL, token, metrics, nics, src, insecure, join, stateDir, deny := f.hub, f.token, f.metrics, f.nics, f.src, f.insecure, f.join, f.stateDir, f.deny
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if *hubURL == "" || (*token == "" && *join == "" && !hasSavedToken(*stateDir)) {
 		fmt.Fprintln(os.Stderr, "usage: uptimeforge-agent --hub https://hub.example.com --token TOKEN")
 		fmt.Fprintln(os.Stderr, "       uptimeforge-agent --hub https://hub.example.com --join INVITE-CODE [--state-dir DIR]")
 		fmt.Fprintln(os.Stderr, "       uptimeforge-agent check <vless://…|https://…|host:port> [--via socks5://…]")
+		fmt.Fprintln(os.Stderr, "       uptimeforge-agent launch [the flags above]   # runs the agent updatable by the hub")
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -72,7 +71,8 @@ func main() {
 		}
 		*token = tok
 	}
-	cfg := agent.Config{HubURL: *hubURL, Token: *token, MetricsInterval: *metrics, SourceIP: *src, Insecure: *insecure}
+	cfg := agent.Config{HubURL: *hubURL, Token: *token, MetricsInterval: *metrics, SourceIP: *src, Insecure: *insecure,
+		StateDir: *stateDir, Launcher: os.Getenv("UF_LAUNCHER") == "1"}
 	if *metrics == 0 {
 		cfg.MetricsInterval = -1
 	}
@@ -84,9 +84,65 @@ func main() {
 		log.Info("check types disabled on this probe", "types", *deny)
 	}
 	if err := agent.New(ctx, cfg, log).Run(ctx); err != nil {
+		if errors.Is(err, agent.ErrRestart) {
+			log.Info("restarting into the installed update")
+			os.Exit(update.ExitRestart)
+		}
 		log.Error("agent stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+// flags are the agent's command line, shared by the agent and the launcher
+// (which reads --state-dir from it).
+type flags struct {
+	hub, token, nics, src, join, stateDir, deny *string
+	metrics                                     *time.Duration
+	insecure                                    *bool
+}
+
+func agentFlags(fs *flag.FlagSet) flags {
+	return flags{
+		hub:      fs.String("hub", os.Getenv("UF_HUB"), "hub address, e.g. https://hub.example.com (env UF_HUB)"),
+		token:    fs.String("token", os.Getenv("UF_TOKEN"), "probe token shown by the hub (env UF_TOKEN)"),
+		metrics:  fs.Duration("metrics", envDuration("UF_METRICS_INTERVAL", 15*time.Second), "host metrics interval, 0 to disable (env UF_METRICS_INTERVAL)"),
+		nics:     fs.String("nic", os.Getenv("UF_NIC"), "comma-separated interfaces counted as traffic; default: all physical (env UF_NIC)"),
+		src:      fs.String("source-ip", os.Getenv("UF_SOURCE_IP"), "local address to reach the hub from; empty tries the host's public addresses in turn when the hub is unreachable, \"off\" never does (env UF_SOURCE_IP)"),
+		insecure: fs.Bool("insecure", os.Getenv("UF_INSECURE") == "1", "allow a hub over plain http/ws beyond loopback: the token and checks then cross the network in clear text (env UF_INSECURE=1)"),
+		join:     fs.String("join", os.Getenv("UF_JOIN"), "one-time invite code from the hub: exchanged for a token that is saved in --state-dir (env UF_JOIN)"),
+		stateDir: fs.String("state-dir", envOr("UF_STATE_DIR", agent.DefaultStateDir), "where the token obtained with --join, installed updates and their state are kept (env UF_STATE_DIR)"),
+		deny:     fs.String("deny-types", os.Getenv("UF_DENY_TYPES"), "comma-separated check types this probe refuses to run whatever the hub assigns, e.g. docker,real-browser,system-service (env UF_DENY_TYPES)"),
+	}
+}
+
+// launch runs the agent as a child that can be updated and rolled back:
+//
+//	uptimeforge-agent launch [agent flags...]
+//
+// The child gets the same flags; the state dir is read from them as the
+// agent reads it. Flags the agent would refuse are refused here at once
+// rather than in a restart loop.
+func launch(args []string) int {
+	fs := flag.NewFlagSet("launch", flag.ContinueOnError)
+	f := agentFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2 // the flag package printed why
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	slog.SetDefault(log)
+	self, err := os.Executable()
+	if err != nil {
+		log.Error("cannot find the agent binary", "err", err)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	log.Info("UptimeForge agent launcher", "version", version.Version, "state_dir", *f.stateDir)
+	if err := update.Launch(ctx, *f.stateDir, self, args); err != nil {
+		log.Error("launcher stopped", "err", err)
+		return 1
+	}
+	return 0
 }
 
 // oneOff runs a single check from the command line: handy to test a config

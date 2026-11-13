@@ -19,7 +19,22 @@ const (
 	TypeRun       = "run"        // hub -> agent, run one check now (UI tools)
 	TypeRunResult = "run_result" // agent -> hub
 	TypeLive      = "live"       // hub -> agent, send host metrics fast for a while
+	// TypeUpdate asks an agent under the launcher to install another release;
+	// on success it restarts into it and reports nothing.
+	TypeUpdate       = "update"        // hub -> agent
+	TypeUpdateResult = "update_result" // agent -> hub, only when an update failed
 )
+
+// Update names the release the agent should install.
+type Update struct {
+	Version string `json:"version"`
+}
+
+// UpdateResult says why an update was not installed.
+type UpdateResult struct {
+	Version string `json:"version"`
+	Error   string `json:"error"`
+}
 
 // Live asks for host metrics every IntervalMS for TTLMS; each new Live
 // restarts the TTL, and when it runs out the agent returns to its own
@@ -48,6 +63,9 @@ type Hello struct {
 	Hostname string `json:"hostname"`
 	OS       string `json:"os"`
 	Arch     string `json:"arch"`
+	// Launcher says the agent runs under `uptimeforge-agent launch`, which
+	// installs updates and rolls bad ones back; only such agents can update.
+	Launcher bool `json:"launcher,omitempty"`
 }
 
 type Assign struct {

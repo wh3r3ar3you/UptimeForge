@@ -2,6 +2,10 @@ package agent
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +14,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +26,8 @@ import (
 
 	"github.com/wh3r3ar3you/uptimeforge/internal/checks"
 	"github.com/wh3r3ar3you/uptimeforge/internal/proto"
+	"github.com/wh3r3ar3you/uptimeforge/internal/update"
+	"github.com/wh3r3ar3you/uptimeforge/internal/version"
 )
 
 // SourceIP binds the hub connection: an address the host has works, one it
@@ -295,6 +304,214 @@ func TestAssignMetricsOff(t *testing.T) {
 			}
 			cancel()
 			<-done
+		})
+	}
+}
+
+// updateHub is a fake hub: it assigns, sends TypeUpdate{version} when
+// version is set, serves files under /download/ and reports what the agent
+// says back.
+type updateHub struct {
+	srv     *httptest.Server
+	results chan proto.UpdateResult
+	hello   chan proto.Hello
+	sysinfo chan struct{}
+	mu      sync.Mutex
+	fetched []string
+}
+
+func newUpdateHub(t *testing.T, files map[string][]byte, version string) *updateHub {
+	h := &updateHub{results: make(chan proto.UpdateResult, 4), hello: make(chan proto.Hello, 4), sysinfo: make(chan struct{}, 4)}
+	h.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if name, ok := strings.CutPrefix(r.URL.Path, "/download/"); ok {
+			h.mu.Lock()
+			h.fetched = append(h.fetched, name)
+			h.mu.Unlock()
+			if r.Header.Get("Authorization") != "" {
+				t.Errorf("the download was sent credentials")
+			}
+			b, ok := files[name]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			w.Write(b)
+			return
+		}
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		msg, _ := proto.Encode(proto.TypeAssign, proto.Assign{Probe: "p"})
+		c.Write(r.Context(), websocket.MessageText, msg)
+		if version != "" {
+			msg, _ = proto.Encode(proto.TypeUpdate, proto.Update{Version: version})
+			c.Write(r.Context(), websocket.MessageText, msg)
+		}
+		for {
+			_, data, err := c.Read(r.Context())
+			if err != nil {
+				return
+			}
+			var env proto.Envelope
+			json.Unmarshal(data, &env)
+			switch env.Type {
+			case proto.TypeHello:
+				var hello proto.Hello
+				json.Unmarshal(env.Data, &hello)
+				h.hello <- hello
+			case proto.TypeSysInfo:
+				h.sysinfo <- struct{}{}
+			case proto.TypeUpdateResult:
+				var res proto.UpdateResult
+				json.Unmarshal(env.Data, &res)
+				h.results <- res
+			}
+		}
+	}))
+	t.Cleanup(h.srv.Close)
+	return h
+}
+
+func (h *updateHub) downloads() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.fetched...)
+}
+
+// signedRelease is checksums.txt, its signature and the agent binary for
+// this platform, signed with priv.
+func signedRelease(priv ed25519.PrivateKey, bin []byte) map[string][]byte {
+	name := update.AssetName(runtime.GOOS, update.ReleaseArch())
+	sum := sha256.Sum256(bin)
+	sums := []byte(hex.EncodeToString(sum[:]) + "  " + name + "\n")
+	return map[string][]byte{"checksums.txt": sums, "checksums.txt.sig": update.Sign(priv, sums), name: bin}
+}
+
+func TestAgentHandlesUpdate(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	_, stranger, _ := ed25519.GenerateKey(rand.Reader)
+	keys := []ed25519.PublicKey{pub}
+	bin := []byte("agent 0.9.0")
+
+	t.Run("installs and restarts", func(t *testing.T) {
+		hub := newUpdateHub(t, signedRelease(priv, bin), "0.9.0")
+		dir := t.TempDir()
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		a := New(ctx, Config{HubURL: hub.srv.URL, Token: "t", MetricsInterval: -1, StateDir: dir, Launcher: true, UpdateKeys: keys}, slog.New(slog.DiscardHandler))
+		if err := a.Run(ctx); !errors.Is(err, ErrRestart) {
+			t.Fatalf("Run returned %v, want ErrRestart", err)
+		}
+		if h := <-hub.hello; !h.Launcher {
+			t.Fatal("hello does not say the agent runs under the launcher")
+		}
+		cur, _ := os.ReadFile(filepath.Join(dir, "current"))
+		if strings.TrimSpace(string(cur)) != "0.9.0" {
+			t.Fatalf("current = %q", cur)
+		}
+		exe := "uptimeforge-agent"
+		if runtime.GOOS == "windows" {
+			exe += ".exe"
+		}
+		got, err := os.ReadFile(filepath.Join(dir, "bin", "0.9.0", exe))
+		if err != nil || string(got) != string(bin) {
+			t.Fatalf("installed binary %q %v", got, err)
+		}
+		select {
+		case res := <-hub.results:
+			t.Fatalf("a successful update reported %+v", res)
+		default:
+		}
+	})
+
+	for name, tc := range map[string]struct {
+		files    map[string][]byte
+		launcher bool
+		want     string
+	}{
+		"bad signature":    {signedRelease(stranger, bin), true, "signature"},
+		"files missing":    {map[string][]byte{}, true, "404"},
+		"without launcher": {signedRelease(priv, bin), false, "not running under the launcher"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			hub := newUpdateHub(t, tc.files, "0.9.0")
+			dir := t.TempDir()
+			ctx, cancel := context.WithCancel(context.Background())
+			a := New(ctx, Config{HubURL: hub.srv.URL, Token: "t", MetricsInterval: -1, StateDir: dir, Launcher: tc.launcher, UpdateKeys: keys}, slog.New(slog.DiscardHandler))
+			done := make(chan error, 1)
+			go func() { done <- a.Run(ctx) }()
+			select {
+			case res := <-hub.results:
+				if res.Version != "0.9.0" || !strings.Contains(res.Error, tc.want) {
+					t.Fatalf("result %+v, want an error with %q", res, tc.want)
+				}
+				if host := strings.TrimPrefix(hub.srv.URL, "http://"); strings.Contains(res.Error, host) {
+					t.Fatalf("the error names the hub: %s", res.Error)
+				}
+			case err := <-done:
+				t.Fatalf("Run returned %v", err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("no update result")
+			}
+			if !tc.launcher && len(hub.downloads()) != 0 {
+				t.Fatalf("downloaded without a launcher: %v", hub.downloads())
+			}
+			select {
+			case err := <-done:
+				t.Fatalf("the agent stopped after a failed update: %v", err)
+			case <-time.After(300 * time.Millisecond):
+			}
+			if _, err := os.Stat(filepath.Join(dir, "current")); err == nil {
+				t.Fatal("current written by a failed update")
+			}
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatalf("Run returned %v", err)
+			}
+		})
+	}
+
+	t.Run("own version", func(t *testing.T) {
+		hub := newUpdateHub(t, signedRelease(priv, bin), version.Version)
+		ctx, cancel := context.WithCancel(context.Background())
+		a := New(ctx, Config{HubURL: hub.srv.URL, Token: "t", MetricsInterval: -1, StateDir: t.TempDir(), Launcher: true, UpdateKeys: keys}, slog.New(slog.DiscardHandler))
+		done := make(chan error, 1)
+		go func() { done <- a.Run(ctx) }()
+		<-hub.hello
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+		if err := <-done; err != nil || len(hub.downloads()) != 0 || len(hub.results) != 0 {
+			t.Fatalf("Run %v, downloads %v, %d results", err, hub.downloads(), len(hub.results))
+		}
+	})
+}
+
+// Under the launcher the agent marks its version as connected once the hub
+// has assigned it work; outside the launcher it leaves the state dir alone.
+func TestAgentWritesConnectedMarker(t *testing.T) {
+	for _, launcher := range []bool{true, false} {
+		t.Run(fmt.Sprint("launcher=", launcher), func(t *testing.T) {
+			hub := newUpdateHub(t, nil, "")
+			dir := t.TempDir()
+			ctx, cancel := context.WithCancel(context.Background())
+			a := New(ctx, Config{HubURL: hub.srv.URL, Token: "t", MetricsInterval: time.Hour, StateDir: dir, Launcher: launcher}, slog.New(slog.DiscardHandler))
+			done := make(chan error, 1)
+			go func() { done <- a.Run(ctx) }()
+			defer func() { cancel(); <-done }()
+			select {
+			case <-hub.sysinfo: // sent after the assignment was handled
+			case <-time.After(10 * time.Second):
+				t.Fatal("no sysinfo")
+			}
+			_, err := os.Stat(filepath.Join(dir, update.ConnectedMarker(version.Version)))
+			if launcher && err != nil {
+				t.Fatalf("no connected marker: %v", err)
+			}
+			if !launcher && err == nil {
+				t.Fatal("marker written outside the launcher")
+			}
 		})
 	}
 }
