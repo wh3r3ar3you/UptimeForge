@@ -2769,6 +2769,9 @@ func TestCheckerOfflineIsQuiet(t *testing.T) {
 	}
 	h.mu.Unlock()
 	h.tick()
+	if ev := rec.find(model.EventOpen, "probe:chk"); ev != nil {
+		t.Fatalf("a checker going offline was announced: %+v", ev.Incident)
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.incidents["probe:chk"] != nil {
@@ -2839,5 +2842,80 @@ func TestCheckerMetricsDropped(t *testing.T) {
 	h.IngestMetrics("srv", cpuAt(5))
 	if n := rec.systems(); n != 1 {
 		t.Fatalf("a server agent's metrics must be stored, recorder got %d", n)
+	}
+}
+
+// The global internet baseline is offered to every checker whatever its
+// selectors say: it carries no secrets and it is what tells a dead home line
+// from a dead node.
+func TestCheckerGetsGlobalBaseline(t *testing.T) {
+	cfg := &Config{DataDir: t.TempDir(),
+		Baseline: []checks.Spec{{Type: "tcp", TCP: &checks.TCPParams{Address: "10.0.0.2:443"}}},
+		Probes: []ProbeConfig{
+			{ID: "chk", Token: "token-chk-0123456789", Role: RoleChecker, Labels: map[string]string{"isp": "mts"}},
+			{ID: "srv", Token: "token-srv-0123456789", Probing: true, Labels: map[string]string{"isp": "mts"}},
+		},
+		Checks: []CheckConfig{tcpCheck("node", "isp=mts")}}
+	h, err := New(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{}
+	h.AddNotifier(rec)
+	if got, want := assignedIDs(h, "chk"), []string{"_baseline/0", "node"}; !slices.Equal(got, want) {
+		t.Fatalf("checker got %v, want %v", got, want)
+	}
+	if got, want := assignedIDs(h, "srv"), []string{"_baseline/0", "node"}; !slices.Equal(got, want) {
+		t.Fatalf("server agent got %v, want %v", got, want)
+	}
+	h.mu.Lock()
+	for _, p := range h.probes {
+		p.online = true
+		p.since = time.Now().Add(-time.Hour)
+	}
+	h.mu.Unlock()
+	for range 3 {
+		h.Ingest("chk", []checks.Result{res("_baseline/0", false), res("node", false)})
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.probes["chk"].noNet {
+		t.Fatal("a checker without internet must be noNet, so its failures stay out of verdicts")
+	}
+	if h.incidents["probe-net:chk"] != nil || h.incidents["node"] != nil {
+		t.Fatalf("a checker without internet raised alerts: %v", h.incidents)
+	}
+}
+
+// A probe that becomes a checker never alerts on its own health, so what it
+// had open is closed without a word.
+func TestProbeBecomingCheckerClosesItsIncidentsQuietly(t *testing.T) {
+	h, rec := testHub(t)
+	h.mu.Lock()
+	now := time.Now()
+	h.transition("probe:ru-a", model.KindProbeOffline, "", nil, meta{name: "ru-a", typ: "probe", severity: "warning"}, now)
+	h.transition("probe-net:ru-a", model.KindProbeNoNet, "", nil, meta{name: "ru-a", typ: "probe", severity: "warning"}, now)
+	h.mu.Unlock()
+	if rec.find(model.EventOpen, "probe:ru-a") == nil || rec.find(model.EventOpen, "probe-net:ru-a") == nil {
+		t.Fatal("setup: the incidents were not announced")
+	}
+	h.mu.Lock()
+	cfg := h.cfg.Clone()
+	h.mu.Unlock()
+	for i := range cfg.Probes {
+		if cfg.Probes[i].ID == "ru-a" {
+			cfg.Probes[i].Role = RoleChecker
+		}
+	}
+	if err := h.Apply(cfg); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.incidents["probe:ru-a"] != nil || h.incidents["probe-net:ru-a"] != nil {
+		t.Fatal("a checker's own-health incidents must be closed")
+	}
+	if rec.find(model.EventResolve, "probe:ru-a") != nil || rec.find(model.EventResolve, "probe-net:ru-a") != nil {
+		t.Fatal("closing them must not notify")
 	}
 }

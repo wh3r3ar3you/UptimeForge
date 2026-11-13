@@ -67,6 +67,19 @@ func (h *Hub) rebuild() {
 	h.checks = next
 	h.computeParents()
 	now := time.Now()
+	for _, id := range h.probeOrder {
+		if !h.probes[id].cfg.Checker() {
+			continue
+		}
+		// A probe that became a checker never alerts on its own health: close
+		// what it had open without telling anyone.
+		for _, key := range []string{"probe:" + id, "probe-net:" + id} {
+			if inc := h.incidents[key]; inc != nil {
+				inc.Notified = false
+				h.transition(key, model.KindOK, "", nil, meta{}, now)
+			}
+		}
+	}
 	for key, inc := range h.incidents { // incidents of checks/probes removed from config
 		if !h.orphaned(key) {
 			continue

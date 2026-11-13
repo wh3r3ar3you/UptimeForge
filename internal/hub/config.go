@@ -544,6 +544,9 @@ func (ch *CheckConfig) runsOn(p *ProbeConfig) bool {
 	if p.Checker() && ch.carriesSecrets && !p.Trusted {
 		return false // a stranger's machine must not see VPN links or passwords
 	}
+	if p.Checker() && ch.baseline && len(ch.Probes) == 0 {
+		return true // the global internet baseline runs everywhere, checkers included: it is how a dead home line is told from a dead node
+	}
 	return (p.RunsChecks() || ch.names(p)) && ch.selects(p)
 }
 
