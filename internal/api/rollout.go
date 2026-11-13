@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"slices"
 
 	"github.com/wh3r3ar3you/uptimeforge/internal/hub"
 	"github.com/wh3r3ar3you/uptimeforge/internal/update"
@@ -29,7 +30,7 @@ func (s *Server) rolloutView() RolloutView {
 	for _, id := range st.InFlight {
 		ids[id] = true
 	}
-	for _, id := range st.NeedReinstall {
+	for _, id := range slices.Concat(st.NeedReinstall, st.Unsupported) {
 		ids[id] = true
 	}
 	for _, f := range st.Failed {

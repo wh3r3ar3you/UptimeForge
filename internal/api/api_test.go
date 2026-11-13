@@ -995,13 +995,14 @@ func TestRolloutAPI(t *testing.T) {
 	s, _ := startHubWith(t, Options{})
 	fake := &fakeRollout{st: hub.RolloutStatus{Version: "0.2.0", Mode: "all", Stage: 2, Updated: 3,
 		InFlight: []string{"edge"}, Failed: []hub.RolloutFailure{{Probe: "home", Error: "the update to 0.2.0 was rolled back"}},
-		Halted: true, NeedReinstall: []string{"router"}}}
+		Halted: true, NeedReinstall: []string{"router"}, Unsupported: []string{"laptop"}, Blocked: "no signed agents on this hub"}}
 	s.rollout = fake
 	srv := httptest.NewServer(s.Handler()) // after the fake is in place
 	defer srv.Close()
 	admin := newClient(t, srv.URL)
 	setupAdmin(admin)
-	for _, p := range []map[string]any{{"id": "edge", "name": "Edge FI", "role": "checker"}, {"id": "home", "name": "Home", "role": "checker"}} {
+	for _, p := range []map[string]any{{"id": "edge", "name": "Edge FI", "role": "checker"}, {"id": "home", "name": "Home", "role": "checker"},
+		{"id": "laptop", "name": "Laptop", "role": "checker"}} {
 		if code := admin.do("POST", "/api/v1/probes", p, nil); code != 201 {
 			t.Fatalf("create probe %v: %d", p["id"], code)
 		}
@@ -1030,8 +1031,11 @@ func TestRolloutAPI(t *testing.T) {
 		!slices.Equal(st.InFlight, []string{"edge"}) || !slices.Equal(st.NeedReinstall, []string{"router"}) || !st.Release {
 		t.Errorf("status %+v", st)
 	}
-	if st.Names["edge"] != "Edge FI" || st.Names["home"] != "Home" {
+	if st.Names["edge"] != "Edge FI" || st.Names["home"] != "Home" || st.Names["laptop"] != "Laptop" {
 		t.Errorf("names %v", st.Names)
+	}
+	if st.Blocked != "no signed agents on this hub" || !slices.Equal(st.Unsupported, []string{"laptop"}) {
+		t.Errorf("blocked %q, unsupported %v", st.Blocked, st.Unsupported)
 	}
 	if code := admin.do("POST", "/api/v1/agents/rollout/resume", nil, &st); code != 200 {
 		t.Fatalf("admin resume: %d", code)
@@ -1041,5 +1045,31 @@ func TestRolloutAPI(t *testing.T) {
 	}
 	if st.Halted {
 		t.Errorf("resume answers the status before the resume: %+v", st)
+	}
+}
+
+// The hub learns from the agents dir what it can hand agents to update
+// from: a signature, and a binary per platform. The answer follows the dir.
+func TestAgentFilesForRollout(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("uptimeforge-agent_linux_amd64")
+	write("checksums.txt")
+	f := newAgentFiles(dir)
+	if f.Signed() || !f.Has("uptimeforge-agent_linux_amd64") || f.Has("uptimeforge-agent_windows_amd64.exe") || f.Has("checksums.txt") {
+		t.Fatal("unsigned dir with one linux agent read wrong")
+	}
+	write("checksums.txt.sig")
+	write("uptimeforge-agent_windows_amd64.exe")
+	f.expire()
+	if !f.Signed() || !f.Has("uptimeforge-agent_windows_amd64.exe") {
+		t.Fatal("the dir changed, the answer did not")
+	}
+	if missing := newAgentFiles(filepath.Join(dir, "nope")); missing.Signed() || missing.Has("uptimeforge-agent_linux_amd64") {
+		t.Fatal("a missing dir serves something")
 	}
 }

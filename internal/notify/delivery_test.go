@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -337,6 +339,9 @@ func TestReasonTexts(t *testing.T) {
 		{"egress_unknown", "", "не удалось определить IP выхода", "exit IP could not be determined"},
 		{"panic", "", "проверка аварийно завершилась", "the check crashed"},
 		{"subscription", "", "подписка недоступна", "subscription unavailable"},
+		{"update_missing", "not back on 0.2.0 within 10 m", "не вернулся на новую версию", "not back on the new version"},
+		{"update_rolled_back", "back on 0.1.0: the update to 0.2.0 was rolled back", "обновление откатилось", "update rolled back"},
+		{"update_unstable", "no 10 m in a row on 0.2.0 within 1 h of the update", "постоянно перезапускается на новой версии", "keeps restarting on the new version"},
 	}
 	for _, c := range cases {
 		l := model.ProbeLine{Reason: c.reason, Error: c.err}
@@ -425,5 +430,26 @@ func TestHandoverKeepsCards(t *testing.T) {
 	next.deliver(context.Background(), event(model.EventUpdate, model.KindDown))
 	if c := calls(); len(c) != 1 || c[0].method != "editMessageText" {
 		t.Fatalf("the update after a rebuild must edit the old card: %+v", c)
+	}
+}
+
+// The rollout's reasons read the same in the UI (web/src/reason.ts).
+func TestUpdateReasonsMatchUI(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "web", "src", "reason.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := string(b)
+	ru, en, _ := strings.Cut(ui, "\n  en: {")
+	for lang, part := range map[string]string{"ru": ru, "en": en} {
+		for key, text := range texts[lang] {
+			reason, ok := strings.CutPrefix(key, "r_update_")
+			if !ok {
+				continue
+			}
+			if want := "update_" + reason + ": '" + text + "'"; !strings.Contains(part, want) {
+				t.Errorf("reason.ts %s lacks %s", lang, want)
+			}
+		}
 	}
 }

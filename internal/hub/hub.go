@@ -78,6 +78,8 @@ type Hub struct {
 	// (rollout.go); tests replace it.
 	version string
 	roll    rollout
+	// agentFiles is what the hub serves agents to update from (SetAgentFiles).
+	agentFiles AgentFiles
 
 	// OnAgentAddr is told the public address of every agent that connects,
 	// outside the hub lock; the app looks up its network and calls

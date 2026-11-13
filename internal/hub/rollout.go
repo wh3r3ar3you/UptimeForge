@@ -9,18 +9,28 @@ import (
 	"time"
 
 	"github.com/wh3r3ar3you/uptimeforge/internal/model"
+	"github.com/wh3r3ar3you/uptimeforge/internal/notify"
 	"github.com/wh3r3ar3you/uptimeforge/internal/proto"
 	"github.com/wh3r3ar3you/uptimeforge/internal/update"
 )
 
 // The hub updates its agents to its own version in stages: one agent, then
-// 10%, then everyone. An agent is told a version once per hub run. The next
-// stage goes out only when every agent of the current one is online on the
-// new version and has run on it for rolloutSoak without a break. An agent of
-// the stage that does not get there halts the rollout and raises
-// update:agents until someone resumes it: one not back on the new version
-// within updateWait of the update or of going missing, or one back on an
-// older version (the launcher rolled the update back).
+// 10%, then everyone; the first two stages take agents on our own servers
+// before checkers. An agent is told a version once per hub run. The next
+// stage goes out only when every agent of the current one has run the new
+// version for rolloutSoak without a break (proven it; one that did may be
+// offline since). An agent of the stage that does not get there halts the
+// rollout and raises update:agents until someone resumes it: one not back on
+// the new version within updateWait of the update or of going missing, one
+// that keeps restarting on it, or one back on an older version (the
+// launcher rolled the update back).
+//
+// A checker is a volunteer's machine that may be switched off for hours:
+// offline, it is no straggler and holds no stage (the stage goes on without
+// it, or with another agent). Back on an older release, it rolled back.
+//
+// Nothing is sent while the hub cannot serve a signed release
+// (SetAgentFiles), nor to an agent whose platform it has no binary for.
 //
 // The state lives in memory: a restarted hub starts over, except that an
 // open update:agents incident for the same version keeps the rollout halted.
@@ -38,6 +48,11 @@ const (
 	// Reasons on the incident's lines.
 	reasonUpdateMissing    = "update_missing"     // not back on the new version
 	reasonUpdateRolledBack = "update_rolled_back" // back on an older version
+	reasonUpdateUnstable   = "update_unstable"    // keeps restarting on the new version
+
+	// blockedUnsigned is RolloutStatus.Blocked when the agents dir has no
+	// checksums.txt.sig: no agent could verify what it would download.
+	blockedUnsigned = "no signed agents on this hub"
 
 	// Notes on a closed incident: why it closed without the agents coming back.
 	noteRolloutResumed = "resumed"        // someone resumed the rollout (ResolvedBy)
@@ -66,7 +81,46 @@ type RolloutStatus struct {
 	// NeedReinstall agents are older and do not run under the launcher, so
 	// they cannot update themselves.
 	NeedReinstall []string `json:"need_reinstall"`
+	// Blocked says why nothing is sent at all (blockedUnsigned); empty when
+	// the rollout can run.
+	Blocked string `json:"blocked,omitempty"`
+	// Unsupported agents could update themselves, but the hub has no binary
+	// for their platform (only Linux agents ship with the hub image).
+	Unsupported []string `json:"unsupported"`
 }
+
+// AgentFiles is the release the hub serves agents under /download/
+// (internal/api): what an update downloads.
+type AgentFiles interface {
+	// Signed says checksums.txt.sig is there.
+	Signed() bool
+	// Has says the release file name (update.AssetName) is there.
+	Has(name string) bool
+}
+
+// SetAgentFiles tells the hub what it serves agents to update from; nil (the
+// default) is nothing, which blocks the rollout.
+func (h *Hub) SetAgentFiles(f AgentFiles) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.agentFiles = f
+}
+
+// rolloutBlocked says why nothing can be sent, or "". Callers hold h.mu.
+func (h *Hub) rolloutBlocked() string {
+	if h.agentFiles == nil || !h.agentFiles.Signed() {
+		return blockedUnsigned
+	}
+	return ""
+}
+
+// served says the hub has the agent binary for p's platform.
+func (h *Hub) served(p *probe) bool {
+	return h.agentFiles == nil || h.agentFiles.Has(update.AssetName(p.hello.OS, update.ReleaseArchOf(p.hello.Arch)))
+}
+
+// humanDuration words a duration the way notifications do ("10 m", "1 h").
+func humanDuration(d time.Duration) string { return (&notify.Formatter{Lang: "en"}).Duration(d) }
 
 type RolloutFailure struct {
 	Probe string `json:"probe"`
@@ -81,6 +135,7 @@ type watch struct {
 	proven      bool      // ran a clean rolloutSoak on the target at least once
 	reconnected bool      // connected again since the send
 	missing     time.Time // off the target since: the send, or when it dropped off
+	away        time.Time // a checker offline since; zero when online
 }
 
 type rollout struct {
@@ -157,10 +212,14 @@ func (r *rollout) onTarget(p *probe) bool {
 	return p.online && p.conn != nil && p.hello.Version == r.target
 }
 
+// offline: the agent has no connection now.
+func offline(p *probe) bool { return !p.online || p.conn == nil }
+
 // rolloutView sorts the connected agents in scope: on the target, ready to
-// be told, or too old to update themselves. Agents on a newer or a
-// non-release version are left alone. Callers hold h.mu.
-func (h *Hub) rolloutView() (updated int, candidates, reinstall []string) {
+// be told, too old to update themselves, or of a platform the hub has no
+// binary for. Agents on a newer or a non-release version are left alone.
+// Callers hold h.mu.
+func (h *Hub) rolloutView() (updated int, candidates, reinstall, unsupported []string) {
 	r := &h.roll
 	checkersOnly := h.cfg.AgentUpdateMode() == AgentUpdateCheckers
 	for _, id := range slices.Sorted(maps.Keys(h.probes)) {
@@ -175,11 +234,14 @@ func (h *Hub) rolloutView() (updated int, candidates, reinstall []string) {
 		case !r.older(v):
 		case !p.hello.Launcher:
 			reinstall = append(reinstall, id)
-		case !r.told[id]:
+		case r.told[id]:
+		case !h.served(p):
+			unsupported = append(unsupported, id)
+		default:
 			candidates = append(candidates, id)
 		}
 	}
-	return updated, candidates, reinstall
+	return updated, candidates, reinstall, unsupported
 }
 
 // rolloutAttached notes that an agent connected, before the step judges it:
@@ -218,17 +280,17 @@ func (h *Hub) rolloutStep(now time.Time) {
 		}
 	}
 	h.rolloutIncident(now)
-	if r.halted || now.Before(h.started.Add(startupGrace)) {
-		return // halted, or agents are still reconnecting after the hub start
+	if r.halted || now.Before(h.started.Add(startupGrace)) || h.rolloutBlocked() != "" {
+		return // halted, agents still reconnecting after the hub start, or nothing to send
 	}
 
-	updated, candidates, _ := h.rolloutView()
+	updated, candidates, _, _ := h.rolloutView()
 	if r.stage >= 3 {
 		h.sendUpdates(candidates, now) // the rollout is open: whoever turns up old
 		return
 	}
 	if !r.stageDone {
-		active := h.activeMembers()
+		active := h.activeMembers(now)
 		if len(active) == 0 {
 			// Nothing proven at this stage: it is the first, or all its
 			// agents refused the update or left. (Again) as many as it takes.
@@ -243,6 +305,9 @@ func (h *Hub) rolloutStep(now time.Time) {
 		}
 		for _, id := range active {
 			w := r.watching[id]
+			if w != nil && w.proven {
+				continue // ran its soak; where it is now does not hold the stage
+			}
 			if w == nil || w.on.IsZero() || now.Sub(w.on) < rolloutSoak || !r.onTarget(h.probes[id]) {
 				return // not every agent of the stage is on the target and soaked
 			}
@@ -262,6 +327,27 @@ func (h *Hub) rolloutStep(now time.Time) {
 func (h *Hub) follow(id string, w *watch, now time.Time) {
 	r := &h.roll
 	p := h.probes[id]
+	if p != nil && !p.cfg.Virtual() && p.cfg.Checker() {
+		if offline(p) {
+			// A volunteer's machine switched off proves nothing about the
+			// update: no straggler, judged afresh once it is back (and
+			// after updateWait away it holds no stage: activeMembers).
+			w.on = time.Time{}
+			if w.away.IsZero() {
+				w.away = now
+			}
+			return
+		}
+		if !w.away.IsZero() {
+			if now.Sub(w.away) >= updateWait {
+				// Off for longer than an update takes: the update's clock
+				// starts over from its return. A short absence (the agent
+				// restarting) keeps it.
+				w.sent, w.missing = now, now
+			}
+			w.away = time.Time{}
+		}
+	}
 	switch {
 	case p == nil || p.cfg.Virtual(): // deleted: nothing to wait for
 		delete(r.watching, id)
@@ -278,12 +364,12 @@ func (h *Hub) follow(id string, w *watch, now time.Time) {
 			// Back again, but never for a clean soak since the update: it
 			// keeps dying on the new version. One that proved the version
 			// and blips later is just back.
-			r.stragglers[id], r.halted = reasonUpdateMissing, true
+			r.stragglers[id], r.halted = reasonUpdateUnstable, true
 			return
 		}
 		r.settle(id, outcomeBack)
-		if r.stage >= 3 && soaked {
-			delete(r.watching, id) // proven
+		if soaked && (r.stage >= 3 || r.stageDone || !slices.Contains(r.members, id)) {
+			delete(r.watching, id) // proven, and no stage waits on it
 		}
 		return
 	case p.online && !r.older(p.hello.Version):
@@ -301,7 +387,13 @@ func (h *Hub) follow(id string, w *watch, now time.Time) {
 	case p.online && w.wasOn:
 		// It ran the new version and is back on an older one: rolled back.
 		r.stragglers[id] = reasonUpdateRolledBack
-	case now.Sub(w.missing) < updateWait && (w.proven || now.Sub(w.sent) < rolloutFlapLimit):
+	case w.proven:
+		return // it proved the version: its absence is its own business
+	case w.wasOn && now.Sub(w.sent) >= rolloutFlapLimit && now.Sub(w.missing) < updateWait:
+		// Between two starts on the new version, an hour on: it keeps
+		// restarting. Gone for updateWait, it is missing.
+		r.stragglers[id] = reasonUpdateUnstable
+	case now.Sub(w.missing) < updateWait && now.Sub(w.sent) < rolloutFlapLimit:
 		return
 	case p.online && w.reconnected:
 		// Back on its old version without ever reaching the new one.
@@ -313,21 +405,41 @@ func (h *Hub) follow(id string, w *watch, now time.Time) {
 }
 
 // activeMembers are the agents of the current stage still in the rollout:
-// not failed, not gone, not moved to another version.
-func (h *Hub) activeMembers() []string {
+// not failed, not gone, not moved to another version, and not a checker
+// that went away before it proved the version and stayed away as long as an
+// update takes (it holds no stage; a shorter absence may be its restart into
+// the update).
+func (h *Hub) activeMembers(now time.Time) []string {
 	r := &h.roll
 	var out []string
 	for _, id := range r.members {
-		if p := h.probes[id]; p != nil && !p.cfg.Virtual() && r.failed[id] == "" && !r.left[id] {
-			out = append(out, id)
+		p := h.probes[id]
+		if p == nil || p.cfg.Virtual() || r.failed[id] != "" || r.left[id] {
+			continue
 		}
+		if w := r.watching[id]; w != nil && !w.proven && !w.away.IsZero() && now.Sub(w.away) >= updateWait {
+			continue
+		}
+		out = append(out, id)
 	}
 	return out
 }
 
-// startStage tells the current stage's share of candidates to update.
+// startStage tells the current stage's share of candidates to update:
+// agents on our own servers first, checkers when no server is left.
 func (h *Hub) startStage(candidates []string, now time.Time) {
 	r := &h.roll
+	candidates = slices.Clone(candidates)
+	slices.SortStableFunc(candidates, func(a, b string) int {
+		ca, cb := h.probes[a].cfg.Checker(), h.probes[b].cfg.Checker()
+		switch {
+		case ca == cb:
+			return 0
+		case cb:
+			return -1
+		}
+		return 1
+	})
 	n := len(candidates)
 	switch r.stage {
 	case 1:
@@ -372,9 +484,12 @@ func (h *Hub) rolloutIncident(now time.Time) {
 	var lines []model.ProbeLine
 	for _, id := range slices.Sorted(maps.Keys(r.stragglers)) {
 		p := h.probes[id]
-		l := h.probeLine(p, false, r.stragglers[id], fmt.Sprintf("not back on %s within %s", r.target, updateWait))
-		if l.Reason == reasonUpdateRolledBack {
+		l := h.probeLine(p, false, r.stragglers[id], fmt.Sprintf("not back on %s within %s", r.target, humanDuration(updateWait)))
+		switch l.Reason {
+		case reasonUpdateRolledBack:
 			l.Error = fmt.Sprintf("back on %s: the update to %s was rolled back", p.hello.Version, r.target)
+		case reasonUpdateUnstable:
+			l.Error = fmt.Sprintf("no %s in a row on %s within %s of the update", humanDuration(rolloutSoak), r.target, humanDuration(rolloutFlapLimit))
 		}
 		lines = append(lines, l)
 	}
@@ -409,7 +524,7 @@ func (h *Hub) adoptHalt(now time.Time) {
 		if h.probes[l.Probe] != nil {
 			past := now.Add(-updateWait)
 			r.told[l.Probe] = true
-			r.watching[l.Probe] = &watch{sent: past, missing: past, wasOn: l.Reason == reasonUpdateRolledBack}
+			r.watching[l.Probe] = &watch{sent: past, missing: past, wasOn: l.Reason != reasonUpdateMissing}
 			r.stragglers[l.Probe], r.halted = l.Reason, true
 		}
 	}
@@ -422,13 +537,15 @@ func (h *Hub) Rollout() RolloutStatus {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	st := RolloutStatus{Version: h.version, Mode: h.cfg.AgentUpdateMode(),
-		InFlight: []string{}, Failed: []RolloutFailure{}, NeedReinstall: []string{}} // "[]", not null, for the UI
+		InFlight: []string{}, Failed: []RolloutFailure{}, NeedReinstall: []string{}, Unsupported: []string{}} // "[]", not null, for the UI
 	if !h.rolloutOn() || h.roll.target != h.version {
 		return st
 	}
 	r := &h.roll
-	updated, candidates, reinstall := h.rolloutView()
+	updated, candidates, reinstall, unsupported := h.rolloutView()
 	st.Stage, st.Updated, st.Pending, st.Halted = r.stage, updated, len(candidates), r.halted
+	st.Blocked = h.rolloutBlocked()
+	st.Unsupported = append(st.Unsupported, unsupported...)
 	for _, id := range slices.Sorted(maps.Keys(r.watching)) {
 		if p := h.probes[id]; p == nil || !r.onTarget(p) {
 			st.InFlight = append(st.InFlight, id)
@@ -438,7 +555,7 @@ func (h *Hub) Rollout() RolloutStatus {
 		st.Failed = append(st.Failed, RolloutFailure{Probe: id, Error: r.failed[id]})
 	}
 	st.NeedReinstall = append(st.NeedReinstall, reinstall...)
-	st.Done = updated > 0 && len(candidates) == 0 && len(r.watching) == 0 && !r.halted
+	st.Done = updated > 0 && len(candidates) == 0 && len(r.watching) == 0 && !r.halted && st.Blocked == ""
 	return st
 }
 
@@ -454,9 +571,13 @@ func (h *Hub) ResumeRollout(by string) {
 	}
 	for id, reason := range r.stragglers {
 		delete(r.watching, id)
-		r.failed[id] = fmt.Sprintf("not back on %s within %s of the update", r.target, updateWait)
-		if reason == reasonUpdateRolledBack {
+		switch reason {
+		case reasonUpdateRolledBack:
 			r.failed[id] = fmt.Sprintf("the update to %s was rolled back", r.target)
+		case reasonUpdateUnstable:
+			r.failed[id] = fmt.Sprintf("kept restarting on %s", r.target)
+		default:
+			r.failed[id] = fmt.Sprintf("not back on %s within %s of the update", r.target, humanDuration(updateWait))
 		}
 	}
 	r.stragglers, r.halted = map[string]string{}, false

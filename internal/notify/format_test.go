@@ -329,7 +329,7 @@ func TestFormatAffected(t *testing.T) {
 func agentUpdateIncident(now time.Time) *model.Incident {
 	return &model.Incident{Key: "update:agents", Name: "uptimeforge-agent 0.2.0", Type: "update", Kind: model.KindAgentUpdate, Worst: model.KindAgentUpdate,
 		Severity: model.Warning, Started: now.Add(-12 * time.Minute), PeakFailing: 2, PeakTotal: 2, Lines: []model.ProbeLine{
-			{Probe: "a01", Name: "msk-1", Region: "ru", Reason: "update_missing", Error: "not back on 0.2.0 within 10m0s"},
+			{Probe: "a01", Name: "msk-1", Region: "ru", Reason: "update_missing", Error: "not back on 0.2.0 within 10 m"},
 			{Probe: "a02", Name: "a<b>", Region: "de", Reason: "update_rolled_back", Error: "back on 0.1.0: the update to 0.2.0 was rolled back"},
 		}}
 }
@@ -363,6 +363,18 @@ func TestFormatAgentUpdate(t *testing.T) {
 		t.Errorf("en card:\n%s", msg)
 	}
 
+	// An agent that keeps restarting on the new version says so.
+	unstable := agentUpdateIncident(now)
+	unstable.Lines[0].Reason, unstable.Lines[0].Error = "update_unstable", "no 10 m in a row on 0.2.0 within 1 h of the update"
+	for lang, want := range map[string]string{"ru": "постоянно перезапускается на новой версии", "en": "keeps restarting on the new version"} {
+		f := &Formatter{Lang: lang, Loc: time.UTC}
+		for name, msg := range map[string]string{"card": f.Incident(unstable, now), "rich": f.RichIncident(unstable, now)} {
+			if !strings.Contains(msg, want) || strings.Contains(msg, "не вернулся") || strings.Contains(msg, "not back") {
+				t.Errorf("%s %s, unstable agent:\n%s", lang, name, msg)
+			}
+		}
+	}
+
 	// Back on the new version: recovered.
 	r := *inc
 	r.Resolved = now
@@ -376,6 +388,13 @@ func TestFormatAgentUpdate(t *testing.T) {
 		if strings.Contains(msg, "🟢") || !strings.Contains(msg, "Раскатку продолжил leo") || strings.Contains(msg, "пока не восстановится") {
 			t.Errorf("resumed:\n%s", msg)
 		}
+		// The hub forgets the refusals when it restarts: the text says so.
+		if !strings.Contains(msg, "до перезапуска хаба") {
+			t.Errorf("resumed, without the hub-run limit:\n%s", msg)
+		}
+	}
+	if msg := en.Resolved(&resumed); !strings.Contains(msg, "Rollout resumed by leo") || !strings.Contains(msg, "in this hub run") {
+		t.Errorf("en resumed:\n%s", msg)
 	}
 	// Updates switched off: not a recovery either.
 	stopped := r

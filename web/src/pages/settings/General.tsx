@@ -33,11 +33,15 @@ const L = {
     st_target: 'Целевая версия', st_stage: 'Этап', st_updated: 'Обновлено', st_of: '{0} из {1}', st_pending: 'ждут очереди: {0}',
     stage_0: 'ещё не начиналась', stage_1: '1 — один агент', stage_2: '2 — 10 % агентов', stage_3: '3 — все агенты', st_done: 'Готово',
     st_halted: 'Раскатка остановлена',
-    st_halted_desc: 'Агенты ниже не вернулись на новую версию — она не запустилась или запускатель её откатил. Остальным агентам версия не уйдёт, пока раскатку не продолжат. Проверьте эти серверы и нажмите «Продолжить»: им эту версию больше не отправят, остальным раскатка пойдёт дальше.',
+    st_halted_desc: 'Агенты ниже не вернулись на новую версию — она не запустилась или запускатель её откатил. Остальным агентам версия не уйдёт, пока раскатку не продолжат. Проверьте эти серверы и нажмите «Продолжить»: до перезапуска хаба им эту версию больше не отправят, остальным раскатка пойдёт дальше.',
     st_resume: 'Продолжить',
-    st_in_flight: 'Обновляются сейчас', st_failed: 'Не обновились', st_failed_hint: 'Эту версию им больше не отправят',
+    st_in_flight: 'Обновляются сейчас', st_failed: 'Не обновились', st_failed_hint: 'До перезапуска хаба эту версию им больше не отправят',
     st_reinstall: 'Обновить вручную или переустановить',
-    st_reinstall_hint: 'Эти агенты запущены без запускателя (старая установка или роутер) и сами не обновляются. Это не сбой: обновите бинарник вручную или переустановите агента.',
+    st_reinstall_hint: 'Эти агенты запущены без запускателя (бинарник, Windows, macOS, роутер или старая установка) и сами не обновляются. Это не сбой: обновите бинарник вручную или переустановите агента.',
+    st_blocked: 'Раскатка не идёт: у хаба нет подписанных агентов',
+    st_blocked_desc: 'В каталоге агентов хаба нет checksums.txt.sig, а без подписи агент обновление не поставит. Хаб из релизного образа приносит подписанных агентов с собой; при своей сборке положите в каталог агентов (UF_AGENTS_DIR) checksums.txt и checksums.txt.sig из релиза.',
+    st_unsupported: 'Нет сборки для их платформы',
+    st_unsupported_hint: 'У хаба нет бинарника агента для их ОС и архитектуры (образ хаба несёт только Linux), поэтому им обновление не отправляется. Это не сбой: обновите их вручную.',
     st_error: 'Не удалось получить статус раскатки',
   },
   en: {
@@ -63,11 +67,15 @@ const L = {
     st_target: 'Target version', st_stage: 'Stage', st_updated: 'Updated', st_of: '{0} of {1}', st_pending: 'waiting their turn: {0}',
     stage_0: 'not started yet', stage_1: '1 — one agent', stage_2: '2 — 10% of agents', stage_3: '3 — everyone', st_done: 'Done',
     st_halted: 'The rollout is halted',
-    st_halted_desc: 'The agents below did not come back on the new version: it did not start, or the launcher rolled it back. No other agent gets it until the rollout is resumed. Look at these servers, then press Resume: they are not sent this version again, and the rollout goes on for the rest.',
+    st_halted_desc: 'The agents below did not come back on the new version: it did not start, or the launcher rolled it back. No other agent gets it until the rollout is resumed. Look at these servers, then press Resume: they are not sent this version again until the hub restarts, and the rollout goes on for the rest.',
     st_resume: 'Resume',
-    st_in_flight: 'Updating now', st_failed: 'Did not update', st_failed_hint: 'They are not sent this version again',
+    st_in_flight: 'Updating now', st_failed: 'Did not update', st_failed_hint: 'They are not sent this version again until the hub restarts',
     st_reinstall: 'Update by hand or reinstall',
-    st_reinstall_hint: 'These agents run without the launcher (an older install, or a router) and cannot update themselves. Nothing is broken: replace the binary by hand or reinstall the agent.',
+    st_reinstall_hint: 'These agents run without the launcher (a plain binary, Windows, macOS, a router, or an older install) and cannot update themselves. Nothing is broken: replace the binary by hand or reinstall the agent.',
+    st_blocked: 'The rollout is not running: the hub has no signed agents',
+    st_blocked_desc: 'The hub\'s agents dir has no checksums.txt.sig, and an agent installs no update without the signature. A hub from the release image brings signed agents along; on your own build put checksums.txt and checksums.txt.sig from the release into the agents dir (UF_AGENTS_DIR).',
+    st_unsupported: 'No build for their platform',
+    st_unsupported_hint: 'The hub has no agent binary for their OS and architecture (the hub image carries Linux only), so they are not sent the update. Nothing is broken: update them by hand.',
     st_error: 'Could not load the rollout status',
   },
 };
@@ -131,7 +139,7 @@ function RolloutStatus() {
   else if (!r.release) body = <Text size="sm" c="dimmed">{t('st_dev')}</Text>;
   else if (r.mode === 'off') body = <Text size="sm" c="dimmed">{t('st_off')}</Text>;
   else {
-    const total = r.updated + r.pending + r.in_flight.length + r.failed.length + r.need_reinstall.length;
+    const total = r.updated + r.pending + r.in_flight.length + r.failed.length + r.need_reinstall.length + r.unsupported.length;
     body = (
       <Stack gap="md">
         <Group gap="xl" align="flex-start">
@@ -154,6 +162,11 @@ function RolloutStatus() {
             </Group>
           </Stack>
         </Group>
+        {r.blocked && (
+          <Alert color="orange" icon={<IconRefreshAlert size={18} />} title={t('st_blocked')}>
+            <Text size="sm">{t('st_blocked_desc')}</Text>
+          </Alert>
+        )}
         {r.halted && (
           <Alert color="orange" icon={<IconRefreshAlert size={18} />} title={t('st_halted')}>
             <Stack gap="sm" align="flex-start">
@@ -197,6 +210,15 @@ function RolloutStatus() {
               <Text size="xs" c="dimmed">{t('st_reinstall_hint')}</Text>
             </div>
             <ProbeList ids={r.need_reinstall} names={r.names} />
+          </Stack>
+        )}
+        {r.unsupported.length > 0 && (
+          <Stack gap={6}>
+            <div>
+              <Text size="sm" fw={500}>{t('st_unsupported')}</Text>
+              <Text size="xs" c="dimmed">{t('st_unsupported_hint')}</Text>
+            </div>
+            <ProbeList ids={r.unsupported} names={r.names} />
           </Stack>
         )}
       </Stack>

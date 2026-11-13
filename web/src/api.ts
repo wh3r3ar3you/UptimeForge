@@ -202,6 +202,10 @@ export interface Rollout {
   halted: boolean; done: boolean;
   /** Agents not under the launcher: updated by hand or reinstalled. */
   need_reinstall: string[];
+  /** Why nothing is sent at all ("no signed agents on this hub"); absent when the rollout can run. */
+  blocked?: string;
+  /** Agents under the launcher whose platform the hub serves no binary for. */
+  unsupported: string[];
   /** Display names by probe ID; a probe without one is missing. */
   names: Record<string, string>;
   /** False for a development build of the hub: it updates no agents. */

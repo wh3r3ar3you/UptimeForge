@@ -3726,6 +3726,7 @@ func newRollRig(t *testing.T, cfg *Config) *rollRig {
 	}
 	r := &rollRig{t: t, h: h, rec: &recorder{}, clock: time.Now(), conns: map[string]*agentConn{}}
 	h.version = rollTarget
+	h.SetAgentFiles(&fakeAgentFiles{signed: true})
 	h.now = func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.clock }
 	h.AddNotifier(r.rec)
 	return r
@@ -3742,6 +3743,12 @@ func (r *rollRig) start() {
 
 func (r *rollRig) connect(id, ver string, launcher bool) {
 	r.t.Helper()
+	r.connectOn(id, ver, launcher, "linux", "amd64")
+}
+
+// connectOn is connect from an agent of a given platform (GOOS, GOARCH).
+func (r *rollRig) connectOn(id, ver string, launcher bool, goos, goarch string) {
+	r.t.Helper()
 	r.h.mu.Lock()
 	p := r.h.probes[id]
 	r.h.mu.Unlock()
@@ -3749,7 +3756,7 @@ func (r *rollRig) connect(id, ver string, launcher bool) {
 		r.h.detach(p, old)
 	}
 	ac := &agentConn{assign: make(chan []byte, 1), out: make(chan []byte, 16), cancel: func() {}}
-	if !r.h.attach(p, ac, proto.Hello{Proto: proto.Version, Version: ver, Launcher: launcher}, HashToken(rollToken(id)), netip.Addr{}) {
+	if !r.h.attach(p, ac, proto.Hello{Proto: proto.Version, Version: ver, Launcher: launcher, OS: goos, Arch: goarch}, HashToken(rollToken(id)), netip.Addr{}) {
 		r.t.Fatalf("attach %s refused", id)
 	}
 	r.conns[id] = ac
@@ -3804,6 +3811,21 @@ func (r *rollRig) expectSent(want ...string) {
 	if got := r.sent(); !slices.Equal(got, want) {
 		r.t.Fatalf("updates went to %v, want %v (status %+v)", got, want, r.h.Rollout())
 	}
+}
+
+// fakeAgentFiles is the hub's agents dir: signed or not, and the release
+// files in it (nil: every platform).
+type fakeAgentFiles struct {
+	mu     sync.Mutex
+	signed bool
+	names  map[string]bool
+}
+
+func (f *fakeAgentFiles) Signed() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.signed }
+func (f *fakeAgentFiles) Has(name string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.names == nil || f.names[name]
 }
 
 func ids(from, to int) []string {
@@ -3914,7 +3936,8 @@ func TestRolloutHaltsOnMissingAgent(t *testing.T) {
 	}
 	inc := ev.Incident
 	if inc.Severity != model.Warning || inc.Kind != model.KindAgentUpdate || !strings.Contains(inc.Name, rollTarget) ||
-		len(inc.Lines) != 1 || inc.Lines[0].Probe != "a01" || inc.Lines[0].OK || inc.Lines[0].Reason != "update_missing" {
+		len(inc.Lines) != 1 || inc.Lines[0].Probe != "a01" || inc.Lines[0].OK || inc.Lines[0].Reason != "update_missing" ||
+		inc.Lines[0].Error != "not back on 0.2.0 within 10 m" {
 		t.Fatalf("incident %+v", inc)
 	}
 	r.advance(time.Hour)
@@ -3923,7 +3946,7 @@ func TestRolloutHaltsOnMissingAgent(t *testing.T) {
 
 	r.h.ResumeRollout("leo")
 	st := r.h.Rollout()
-	if st.Halted || len(st.Failed) != 1 || st.Failed[0].Probe != "a01" || st.Failed[0].Error == "" || len(st.InFlight) != 1 {
+	if st.Halted || len(st.Failed) != 1 || st.Failed[0].Probe != "a01" || st.Failed[0].Error != "not back on 0.2.0 within 10 m of the update" || len(st.InFlight) != 1 {
 		t.Fatalf("after resume %+v", st)
 	}
 	if r.rec.find(model.EventResolve, rolloutKey) == nil {
@@ -4083,7 +4106,7 @@ func TestRolloutModes(t *testing.T) {
 		r := newRollRig(t, rolloutCfg(t, 0, mixed("")))
 		connectAll(r)
 		r.start()
-		r.expectSent("chk1")
+		r.expectSent("srv") // a server agent before the checkers
 	})
 	t.Run("switched off mid-rollout", func(t *testing.T) {
 		r := haltedRig(t, nil)
@@ -4664,10 +4687,19 @@ func TestRolloutFlappingMemberHalts(t *testing.T) {
 	r.tick()
 	st := r.h.Rollout()
 	ev := r.rec.find(model.EventOpen, rolloutKey)
-	if !st.Halted || ev == nil || len(ev.Incident.Lines) != 1 || ev.Incident.Lines[0].Probe != "a01" || ev.Incident.Lines[0].Reason != "update_missing" {
+	if !st.Halted || ev == nil || len(ev.Incident.Lines) != 1 || ev.Incident.Lines[0].Probe != "a01" || ev.Incident.Lines[0].Reason != "update_unstable" ||
+		ev.Incident.Lines[0].Error != "no 10 m in a row on 0.2.0 within 1 h of the update" {
 		t.Fatalf("a flapping canary an hour on: %+v, incident %+v", st, ev)
 	}
 	r.expectSent()
+	// Between two starts it is still the one that keeps restarting.
+	r.drop("a01")
+	r.advance(time.Minute)
+	r.tick()
+	r.restart("a01")
+	if n := countEvents(r.rec, model.EventUpdate, rolloutKey); n != 0 {
+		t.Fatalf("a restart of the flapping canary changed the incident %d times", n)
+	}
 	// Ten clean minutes on the new version and it counts as back.
 	r.advance(rolloutSoak)
 	r.tick()
@@ -4720,16 +4752,244 @@ func TestRolloutProvenAgentBlipIsNoStraggler(t *testing.T) {
 	if n := countEvents(r.rec, model.EventUpdate, rolloutKey); n != 0 {
 		t.Fatalf("the blip changed the incident %d times", n)
 	}
-	// Gone for good, it is a straggler by the ordinary rule.
+	// It proved the version: gone for good, it is still no straggler.
 	r.drop("a03")
-	r.advance(updateWait - time.Second)
+	r.advance(time.Hour)
 	r.tick()
 	if got := stragglers(); !slices.Equal(got, []string{"a02"}) {
-		t.Fatalf("stragglers %v before 10 minutes", got)
+		t.Fatalf("a proven agent gone an hour: stragglers %v", got)
+	}
+	// Back on an older version, it rolled the update back.
+	r.connect("a03", "0.1.0", true)
+	if got := stragglers(); !slices.Equal(got, []string{"a02", "a03"}) {
+		t.Fatalf("a proven agent back on its old version: stragglers %v", got)
+	}
+}
+
+// A member that proved the version (ran its 10 minutes) and then went away
+// does not hold its stage: the stage goes on once the rest proved it too,
+// and the absence is no straggler.
+func TestRolloutProvenMemberAwayDoesNotBlock(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02", "a03")
+	r.advance(time.Minute)
+	r.restart("a02")
+	r.advance(8 * time.Minute)
+	r.restart("a03")
+	r.advance(2 * time.Minute) // a02 proved the version
+	r.tick()
+	r.drop("a02")
+	r.advance(4 * time.Minute)
+	r.drop("a03") // a03 blips: its 10 minutes start again
+	r.connect("a03", rollTarget, true)
+	r.advance(rolloutSoak - time.Second)
+	r.tick()
+	r.expectSent()
+	if st := r.h.Rollout(); st.Halted || r.rec.find(model.EventOpen, rolloutKey) != nil {
+		t.Fatalf("a02, proven and gone 14 minutes, halted the rollout: %+v", st)
 	}
 	r.advance(time.Second)
 	r.tick()
-	if got := stragglers(); !slices.Equal(got, []string{"a02", "a03"}) {
-		t.Fatalf("a proven agent gone 10 minutes: stragglers %v", got)
+	r.expectSent(ids(4, 20)...)
+	r.restart(ids(4, 20)...)
+	r.advance(time.Hour)
+	r.tick()
+	if st := r.h.Rollout(); st.Halted || r.rec.find(model.EventOpen, rolloutKey) != nil {
+		t.Fatalf("halted: %+v", st)
+	}
+}
+
+// checkerCfg has checker agents c01..cNN and nothing else.
+func checkerCfg(t *testing.T, n int) *Config {
+	return rolloutCfg(t, 0, func(c *Config) {
+		for i := 1; i <= n; i++ {
+			id := fmt.Sprintf("c%02d", i)
+			c.Probes = append(c.Probes, ProbeConfig{ID: id, Token: rollToken(id), Role: RoleChecker})
+		}
+	})
+}
+
+// A checker is a volunteer's machine: switched off, it proves nothing about
+// the update. An offline checker never halts the rollout; the stage goes on
+// without it (or with another agent in its place). Only one that comes back
+// on an older release rolled the update back.
+func TestRolloutOfflineCheckerIsNoStraggler(t *testing.T) {
+	r := newRollRig(t, checkerCfg(t, 20))
+	for i := 1; i <= 20; i++ {
+		r.connect(fmt.Sprintf("c%02d", i), "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("c01")
+	r.drop("c01") // the laptop went to sleep before installing anything
+	r.advance(updateWait - time.Second)
+	r.tick()
+	r.expectSent() // it may be restarting into the update
+	r.advance(time.Second)
+	r.tick()
+	r.expectSent("c02") // gone as long as an update takes: the canary is replaced
+	r.restart("c02")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("c03", "c04")
+	// One checker of the stage is switched off on the new version: the stage
+	// completes with the other.
+	r.restart("c03", "c04")
+	r.advance(time.Minute)
+	r.drop("c04")
+	r.advance(rolloutSoak)
+	r.tick()
+	var want []string
+	for i := 5; i <= 20; i++ {
+		want = append(want, fmt.Sprintf("c%02d", i))
+	}
+	r.expectSent(want...)
+	r.restart(want...)
+	r.advance(2 * time.Hour)
+	r.tick()
+	if st := r.h.Rollout(); st.Halted || r.rec.find(model.EventOpen, rolloutKey) != nil {
+		t.Fatalf("offline checkers halted the rollout: %+v", st)
+	}
+	// c04 is back on the new version after two hours away: just updated.
+	r.connect("c04", rollTarget, true)
+	r.advance(rolloutSoak)
+	r.tick()
+	if st := r.h.Rollout(); st.Halted || slices.Contains(st.InFlight, "c04") {
+		t.Fatalf("c04 back on the new version: %+v", st)
+	}
+	// c01 wakes up on its old version: it gets the time an update takes,
+	// then it is a straggler that rolled the update back.
+	r.connect("c01", "0.1.0", true)
+	r.advance(updateWait - time.Second)
+	r.tick()
+	if st := r.h.Rollout(); st.Halted {
+		t.Fatalf("halted before c01 had the time to update: %+v", st)
+	}
+	r.advance(time.Second)
+	r.tick()
+	ev := r.rec.find(model.EventOpen, rolloutKey)
+	if ev == nil || len(ev.Incident.Lines) != 1 || ev.Incident.Lines[0].Probe != "c01" || ev.Incident.Lines[0].Reason != "update_rolled_back" {
+		t.Fatalf("c01 back on its old version: %+v", ev)
+	}
+}
+
+// A checker that ran the new version and comes back on an older one rolled
+// it back, whatever happened in between.
+func TestRolloutCheckerBackOnOlderHalts(t *testing.T) {
+	r := newRollRig(t, checkerCfg(t, 1))
+	r.connect("c01", "0.1.0", true)
+	r.start()
+	r.expectSent("c01")
+	r.restart("c01")
+	r.advance(time.Minute)
+	r.drop("c01")
+	r.advance(3 * time.Hour)
+	r.tick()
+	if r.rec.find(model.EventOpen, rolloutKey) != nil {
+		t.Fatal("an offline checker raised the incident")
+	}
+	r.connect("c01", "0.1.0", true)
+	ev := r.rec.find(model.EventOpen, rolloutKey)
+	if ev == nil || ev.Incident.Lines[0].Probe != "c01" || ev.Incident.Lines[0].Reason != "update_rolled_back" {
+		t.Fatalf("c01 back on its old version after running the new one: %+v", ev)
+	}
+}
+
+// The first two stages go to agents on our own servers; checkers only when
+// no server is left to try.
+func TestRolloutCanariesAreServersFirst(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 0, func(c *Config) {
+		for i := 1; i <= 3; i++ {
+			id := fmt.Sprintf("a%02d", i) // sort before the servers
+			c.Probes = append(c.Probes, ProbeConfig{ID: id, Token: rollToken(id), Role: RoleChecker})
+		}
+		for i := 1; i <= 19; i++ {
+			id := fmt.Sprintf("s%02d", i)
+			c.Probes = append(c.Probes, ProbeConfig{ID: id, Token: rollToken(id)})
+		}
+	}))
+	for _, id := range []string{"a01", "a02", "a03"} {
+		r.connect(id, "0.1.0", true)
+	}
+	for i := 1; i <= 19; i++ {
+		r.connect(fmt.Sprintf("s%02d", i), "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("s01")
+	r.restart("s01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("s02", "s03", "s04") // 10% of 22
+	r.restart("s02", "s03", "s04")
+	r.advance(rolloutSoak)
+	r.tick()
+	want := []string{"a01", "a02", "a03"}
+	for i := 5; i <= 19; i++ {
+		want = append(want, fmt.Sprintf("s%02d", i))
+	}
+	r.expectSent(want...)
+}
+
+// A hub that cannot hand out a signed release starts no rollout and says
+// why; agents of a platform it has no binary for are listed apart, not
+// failed, and never told.
+func TestRolloutNeedsSignedAgents(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 5, nil))
+	files := &fakeAgentFiles{}
+	r.h.SetAgentFiles(files)
+	for _, id := range ids(1, 3) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.connectOn("a04", "0.1.0", true, "windows", "amd64")
+	r.connectOn("a05", "0.1.0", true, "linux", "arm")
+	r.start()
+	r.advance(time.Hour)
+	r.tick()
+	r.expectSent()
+	if st := r.h.Rollout(); st.Blocked != "no signed agents on this hub" || st.Stage != 0 || len(st.Failed) != 0 || st.Done {
+		t.Fatalf("unsigned agents dir: %+v", st)
+	}
+
+	files.mu.Lock()
+	files.signed = true
+	files.names = map[string]bool{"uptimeforge-agent_linux_amd64": true, "uptimeforge-agent_linux_armv7": true}
+	files.mu.Unlock()
+	r.tick()
+	r.expectSent("a01")
+	st := r.h.Rollout()
+	if st.Blocked != "" || !slices.Equal(st.Unsupported, []string{"a04"}) || len(st.Failed) != 0 || st.Pending != 3 {
+		t.Fatalf("signed agents dir: %+v", st)
+	}
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02")
+	r.restart("a02")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a03", "a05") // linux/arm runs the armv7 binary
+	r.restart("a03", "a05")
+	r.advance(time.Hour)
+	r.tick()
+	r.expectSent()
+	if st := r.h.Rollout(); !slices.Equal(st.Unsupported, []string{"a04"}) || len(st.Failed) != 0 || st.Updated != 4 || !st.Done {
+		t.Fatalf("final status %+v", st)
+	}
+
+	// Without an agents dir at all the hub serves nothing to update from.
+	r2 := newRollRig(t, rolloutCfg(t, 2, nil))
+	r2.h.SetAgentFiles(nil)
+	r2.connect("a01", "0.1.0", true)
+	r2.start()
+	r2.expectSent()
+	if st := r2.h.Rollout(); st.Blocked == "" {
+		t.Fatalf("no agents dir: %+v", st)
 	}
 }

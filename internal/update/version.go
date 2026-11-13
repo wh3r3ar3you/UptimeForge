@@ -97,6 +97,9 @@ func isDigits(s string) bool {
 // ReleaseArch is this binary's architecture as release file names spell it.
 func ReleaseArch() string { return releaseArch(runtime.GOARCH) }
 
+// ReleaseArchOf is a GOARCH (an agent's hello) as release file names spell it.
+func ReleaseArchOf(goarch string) string { return releaseArch(goarch) }
+
 // releaseArch maps a GOARCH to the release name: arm is shipped only as
 // armv7 (GOARM=7); the rest keep their Go names.
 func releaseArch(goarch string) string {

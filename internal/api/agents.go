@@ -102,3 +102,52 @@ func fileSHA256(path string) (string, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
+
+// agentFilesTTL is how long agentFiles trusts its last look at the dir: the
+// hub asks on every tick, while the dir changes with a new image at most.
+const agentFilesTTL = 10 * time.Second
+
+// agentFiles tells the hub (hub.AgentFiles) what /download/ serves agents to
+// update from: checksums.txt.sig and the agent binaries in the agents dir.
+type agentFiles struct {
+	dir   string
+	mu    sync.Mutex
+	read  time.Time
+	names map[string]bool
+}
+
+func newAgentFiles(dir string) *agentFiles { return &agentFiles{dir: dir} }
+
+// Signed says the release signature is there to serve.
+func (f *agentFiles) Signed() bool { return f.list()["checksums.txt.sig"] }
+
+// Has says an agent binary of that name is there to serve.
+func (f *agentFiles) Has(name string) bool { return agentFile.MatchString(name) && f.list()[name] }
+
+// expire makes the next question read the dir again.
+func (f *agentFiles) expire() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.read = time.Time{}
+}
+
+// list is the regular files in the dir, read at most every agentFilesTTL;
+// none if it cannot be read.
+func (f *agentFiles) list() map[string]bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.names != nil && time.Since(f.read) < agentFilesTTL {
+		return f.names
+	}
+	f.names, f.read = map[string]bool{}, time.Now()
+	entries, err := os.ReadDir(f.dir)
+	if err != nil {
+		return f.names
+	}
+	for _, e := range entries {
+		if e.Type().IsRegular() {
+			f.names[e.Name()] = true
+		}
+	}
+	return f.names
+}

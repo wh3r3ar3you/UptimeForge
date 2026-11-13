@@ -60,6 +60,11 @@ func New(a *app.App, opt Options) *Server {
 	s := &Server{app: a, log: a.Log, ui: opt.UI, agentDir: opt.AgentDir, limiter: newLimiter(10, time.Minute),
 		setupToken: opt.SetupToken, setupLimit: newLimiter(10, time.Minute), userLimit: newLimiter(10, 5*time.Minute), bearerLimit: newLimiter(10, time.Minute),
 		joinLimit: newLimiter(10, time.Minute), trust: newTrust(opt.TrustedProxies), metricsToken: opt.MetricsToken, rollout: a.Hub}
+	if opt.AgentDir != "" {
+		// What the hub can hand its agents decides whether it rolls out at
+		// all, and to whom.
+		a.Hub.SetAgentFiles(newAgentFiles(opt.AgentDir))
+	}
 	s.announceSetup()
 	return s
 }
