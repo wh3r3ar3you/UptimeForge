@@ -519,3 +519,19 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	http.ServeFile(w, r, path)
 }
+
+//go:embed join-agent.sh
+var joinScriptText string
+
+// joinScript serves the one-command checker installer, templated like
+// installScript: the hub address and the agent image of this hub's version.
+func (s *Server) joinScript(w http.ResponseWriter, r *http.Request) {
+	hub := s.hubURL(r)
+	if hub == "" {
+		http.Error(w, "bad Host header: set UF_PUBLIC_URL", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Write([]byte(strings.NewReplacer("__HUB_URL__", shellQuote(hub),
+		"__IMAGE__", shellQuote(agentImageFor(version.Version))).Replace(joinScriptText)))
+}

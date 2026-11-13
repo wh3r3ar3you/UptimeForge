@@ -5,8 +5,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +20,7 @@ import (
 	"github.com/wh3r3ar3you/uptimeforge/internal/app"
 	"github.com/wh3r3ar3you/uptimeforge/internal/hub"
 	"github.com/wh3r3ar3you/uptimeforge/internal/store/pgtest"
+	"github.com/wh3r3ar3you/uptimeforge/internal/version"
 )
 
 // logBuffer is a log sink tests can read while the hub writes to it.
@@ -251,5 +257,66 @@ func TestInviteCodeNotLeaked(t *testing.T) {
 		if strings.Contains(string(o.Data), inv.Code) || strings.Contains(string(o.Data), spent.Code) {
 			t.Fatalf("the database holds a code: %s", o.Data)
 		}
+	}
+}
+
+func TestJoinScript(t *testing.T) {
+	s, _ := startHubWith(t, Options{})
+	r := httptest.NewRequest("GET", "/join.sh", nil)
+	r.Host = "hub.example.com"
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != 200 || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/x-shellscript") {
+		t.Fatalf("%d %q", w.Code, w.Header().Get("Content-Type"))
+	}
+	script := w.Body.String()
+	for _, want := range []string{
+		"default_hub='http://hub.example.com'", "get.docker.com", "compose.yml", "mem_limit: 256m", "cpus: 0.5",
+		"read_only: true", "cap_drop", "network_mode: host", "restart: unless-stopped", "no-new-privileges",
+		":/state", "UF_STATE_DIR", "UF_JOIN", "/install.sh", "docker compose up -d", "set -eu", agentImageFor(version.Version),
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script lacks %q", want)
+		}
+	}
+	if strings.Contains(script, "__") {
+		t.Errorf("a placeholder was left in the script")
+	}
+	if sh, err := exec.LookPath("sh"); err == nil {
+		f := filepath.Join(t.TempDir(), "join.sh")
+		os.WriteFile(f, []byte(script), 0o644)
+		if out, err := exec.Command(sh, "-n", f).CombinedOutput(); err != nil {
+			t.Fatalf("script does not parse: %v\n%s", err, out)
+		}
+	}
+}
+
+func TestJoinScriptRefusesBadHost(t *testing.T) {
+	_, srv, _ := startHub(t)
+	for _, h := range []string{"$(touch /tmp/pwned)", "hub.example.com;id", "a`id`", "x' y"} {
+		req, _ := http.NewRequest("GET", srv.URL+"/join.sh", nil)
+		req.Header.Set("X-Forwarded-Host", h)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 400 || strings.Contains(string(body), h) {
+			t.Errorf("host %q: %d\n%s", h, resp.StatusCode, body)
+		}
+	}
+}
+
+// The binary fallback enrolls with the invite code instead of a token, and
+// the agent gets a writable place to keep the token it receives.
+func TestInstallScriptAcceptsJoin(t *testing.T) {
+	for _, want := range []string{"UF_JOIN", "UF_STATE_DIR", "StateDirectory="} {
+		if !strings.Contains(installScript, want) {
+			t.Errorf("install script lacks %q", want)
+		}
+	}
+	if strings.Contains(installScript, `[ -n "${UF_TOKEN:-}" ] || {`) {
+		t.Errorf("install script still demands UF_TOKEN")
 	}
 }

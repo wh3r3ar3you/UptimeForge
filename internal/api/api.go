@@ -140,6 +140,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/push/{token}", s.push)
 
 	mux.HandleFunc("GET /install.sh", s.installScript)
+	mux.HandleFunc("GET /join.sh", s.joinScript)
 	mux.HandleFunc("GET /download/{file}", s.download)
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
