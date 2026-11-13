@@ -148,8 +148,13 @@ type RunOutcome struct {
 	Error  string         `json:"error,omitempty"`
 }
 
+// errNeedsTrusted is the run-once answer of an untrusted checker to a check
+// that carries secrets.
+const errNeedsTrusted = "нужен доверенный агент: the check carries secrets and this checker is not trusted"
+
 // RunOnce runs spec right now on the given probes (all online ones if empty)
 // and waits for every answer: the "check this config from there" tool.
+// An untrusted checker is not sent a spec that carries secrets.
 func (h *Hub) RunOnce(ctx context.Context, spec checks.Spec, probeIDs []string) []RunOutcome {
 	if spec.ID == "" {
 		spec.ID = "_run"
@@ -171,6 +176,7 @@ func (h *Hub) RunOnce(ctx context.Context, spec checks.Spec, probeIDs []string) 
 		run func() (checks.Result, error)
 	}
 	var targets []target
+	secret := checks.CarriesSecrets(&spec)
 	for _, id := range probeIDs {
 		p := h.probes[id]
 		if p == nil {
@@ -178,6 +184,10 @@ func (h *Hub) RunOnce(ctx context.Context, spec checks.Spec, probeIDs []string) 
 		}
 		t := target{out: RunOutcome{Probe: id, Name: p.cfg.Name, Region: p.cfg.Labels[h.cfg.RegionLabel]}}
 		switch {
+		case secret && p.cfg.Checker() && !p.cfg.Trusted:
+			// Someone else's machine nobody vouched for gets no secrets, even on request.
+			t.out.Result = &checks.Result{CheckID: spec.ID, Status: checks.Down, Reason: "unavailable", At: time.Now(),
+				Error: errNeedsTrusted}
 		case p.runner != nil:
 			r := p.runner
 			t.run = func() (checks.Result, error) { return r.RunOnce(ctx, spec), nil }

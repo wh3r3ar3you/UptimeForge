@@ -28,6 +28,7 @@ type Server struct {
 	setupLimit   *limiter
 	userLimit    *limiter // login attempts per username
 	bearerLimit  *limiter // wrong admin bearer tokens per address
+	joinLimit    *limiter // invite exchanges per address
 	trust        trust    // which proxies' X-Forwarded-* count
 	metricsToken string
 	agentSums    agentSums // sha256 of the agent binaries, for checksums.txt
@@ -57,7 +58,7 @@ type Options struct {
 func New(a *app.App, opt Options) *Server {
 	s := &Server{app: a, log: a.Log, ui: opt.UI, agentDir: opt.AgentDir, limiter: newLimiter(10, time.Minute),
 		setupToken: opt.SetupToken, setupLimit: newLimiter(10, time.Minute), userLimit: newLimiter(10, 5*time.Minute), bearerLimit: newLimiter(10, time.Minute),
-		trust: newTrust(opt.TrustedProxies), metricsToken: opt.MetricsToken}
+		joinLimit: newLimiter(10, time.Minute), trust: newTrust(opt.TrustedProxies), metricsToken: opt.MetricsToken}
 	s.announceSetup()
 	return s
 }
@@ -99,6 +100,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/probes/{id}/token", admin(s.rotateToken))
 	mux.Handle("GET /api/v1/probes/{id}/metrics", view(s.probeMetrics))
 	mux.Handle("GET /api/v1/sparklines", view(s.sparklines))
+
+	mux.Handle("POST /api/v1/checkers/invites", admin(s.createInvite))
+	mux.Handle("GET /api/v1/checkers/invites", admin(s.listInvites))
+	mux.Handle("DELETE /api/v1/checkers/invites/{id}", admin(s.revokeInvite))
+	mux.HandleFunc("POST /api/agent/join", s.join)
 
 	mux.Handle("GET /api/v1/incidents", view(s.listIncidents))
 	mux.Handle("POST /api/v1/incidents/{id}/ack", admin(s.ackIncident))

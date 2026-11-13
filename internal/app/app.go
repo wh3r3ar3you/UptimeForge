@@ -65,6 +65,8 @@ type App struct {
 	rw        remnawaveState
 	nodes     nodeSnapshot
 	geo       geoDB
+
+	inviteMu sync.Mutex // one invite change at a time: a code is spent once
 }
 
 const (

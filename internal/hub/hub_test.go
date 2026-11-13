@@ -3082,3 +3082,46 @@ func TestNetworkLabelsKeptAcrossApply(t *testing.T) {
 		t.Fatalf("a stale lookup relabelled the checker: isp=%s", isp)
 	}
 }
+
+// "Check this config from there" may pick any checker, but a config with a
+// secret is not handed to one nobody vouched for: the answer says why, and
+// the agent sees nothing. A trusted checker, or a check without secrets,
+// still goes out.
+func TestRunOnceRefusesSecretsOnUntrustedChecker(t *testing.T) {
+	vpn := checks.Spec{Type: "xray", Xray: &checks.XrayParams{
+		Link: "vless://b831381d-6324-4d53-ad4f-8cda48b30811@ok.example.com:443?type=tcp#ok"}}
+	plain := checks.Spec{Type: "tcp", TCP: &checks.TCPParams{Address: "10.0.0.1:443"}}
+	connect := func(h *Hub) chan []byte {
+		out := make(chan []byte, 16)
+		h.mu.Lock()
+		h.probes["chk"].conn = &agentConn{assign: make(chan []byte, 1), out: out}
+		h.mu.Unlock()
+		return out
+	}
+
+	h := checkerHub(t, false)
+	out := connect(h)
+	got := h.RunOnce(context.Background(), vpn, []string{"chk"})
+	if len(got) != 1 || got[0].Result == nil || got[0].Result.Status != checks.Down || got[0].Result.Reason != "unavailable" ||
+		!strings.Contains(got[0].Result.Error, "нужен доверенный агент") {
+		t.Fatalf("untrusted checker, xray: %+v (result %+v)", got, got[0].Result)
+	}
+	if n := len(out); n != 0 {
+		t.Fatalf("%d messages went to the untrusted checker", n)
+	}
+
+	// The same checker still runs what carries no secret; a trusted one runs
+	// both. A cancelled context returns once the request went out.
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.RunOnce(done, plain, []string{"chk"})
+	if n := len(out); n != 1 {
+		t.Fatalf("a plain check sent %d messages to the checker, want 1", n)
+	}
+	h = checkerHub(t, true)
+	out = connect(h)
+	h.RunOnce(done, vpn, []string{"chk"})
+	if n := len(out); n != 1 {
+		t.Fatalf("a trusted checker got %d messages for xray, want 1", n)
+	}
+}
