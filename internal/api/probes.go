@@ -36,6 +36,9 @@ func (s *Server) listProbes(w http.ResponseWriter, r *http.Request) {
 		}
 		items[p.ID] = p
 	}
+	if viewer {
+		redactProbeStatus(snap.Probes)
+	}
 	traffic := s.traffic24h(r.Context())
 	rows := make([]ProbeRow, 0, len(snap.Probes))
 	for _, ps := range snap.Probes {

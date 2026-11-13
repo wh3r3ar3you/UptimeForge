@@ -6,14 +6,94 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
+	"time"
 
 	"github.com/wh3r3ar3you/uptimeforge/internal/geoip"
+	"github.com/wh3r3ar3you/uptimeforge/internal/hub"
+	"github.com/wh3r3ar3you/uptimeforge/internal/store"
 	"github.com/wh3r3ar3you/uptimeforge/internal/xray"
 )
 
-// countryDB is the country database behind LocateProxy (a fake in tests).
-type countryDB interface {
+// geoDB is the database behind LocateProxy and the networks of agents (a
+// fake in tests).
+type geoDB interface {
 	Country(ctx context.Context, ip netip.Addr) (string, error)
+	Network(ctx context.Context, ip netip.Addr) (geoip.Network, error)
+}
+
+// networkLookupTimeout bounds one agent's lookup: a database being downloaded
+// must not keep its labels waiting forever; the next connect tries again.
+const networkLookupTimeout = 10 * time.Second
+
+// agentAddr is the hub's OnAgentAddr: it looks the address up off the hub's
+// path, hands the result to the hub and saves the labels a checker got from
+// it with the probe, so they are there after a restart. Without a database
+// (or for a private address) the hub still learns the address.
+func (a *App) agentAddr(probeID string, ip netip.Addr) {
+	a.mu.Lock()
+	parent := a.ctx
+	a.mu.Unlock()
+	if parent == nil {
+		parent = context.Background()
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(parent, networkLookupTimeout)
+		defer cancel()
+		n, err := a.geo.Network(ctx, ip)
+		if err != nil {
+			if ip.IsGlobalUnicast() && !ip.IsPrivate() {
+				a.Log.Warn("agent network lookup failed", "probe", probeID, "err", err)
+			}
+			n = geoip.Network{IP: ip}
+		}
+		a.Hub.SetNetwork(probeID, n)
+		if err := a.saveNetworkLabels(ctx, probeID); err != nil && parent.Err() == nil {
+			a.Log.Warn("save the labels of an agent's network", "probe", probeID, "err", err)
+		}
+	}()
+}
+
+// saveNetworkLabels copies the network labels the hub gave a checker into its
+// saved probe object. A probe from the config file is not saved; neither is a
+// label the admin locked.
+func (a *App) saveNetworkLabels(ctx context.Context, probeID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.managed.probes[probeID] {
+		return nil
+	}
+	var live map[string]string
+	for _, p := range a.Hub.Config().Probes {
+		if p.ID == probeID {
+			live = p.Labels
+		}
+	}
+	var obj hub.ProbeConfig
+	if err := a.Store.GetObject(ctx, kindProbe, probeID, &obj); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil // deleted meanwhile
+		}
+		return err
+	}
+	if !obj.Checker() {
+		return nil
+	}
+	changed := false
+	for _, k := range hub.NetworkLabels {
+		v := live[k]
+		if v == "" || obj.Labels[k] == v || slices.Contains(obj.LabelsLocked, k) {
+			continue
+		}
+		if obj.Labels == nil {
+			obj.Labels = map[string]string{}
+		}
+		obj.Labels[k], changed = v, true
+	}
+	if !changed {
+		return nil
+	}
+	return a.Store.PutObject(ctx, kindProbe, probeID, obj)
 }
 
 // ProxyLocation is where a proxy's server is: what the "add server" form

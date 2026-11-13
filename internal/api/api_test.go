@@ -18,9 +18,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/wh3r3ar3you/uptimeforge/internal/agent"
 	"github.com/wh3r3ar3you/uptimeforge/internal/app"
+	"github.com/wh3r3ar3you/uptimeforge/internal/geoip"
+	"github.com/wh3r3ar3you/uptimeforge/internal/hub"
 	"github.com/wh3r3ar3you/uptimeforge/internal/model"
+	"github.com/wh3r3ar3you/uptimeforge/internal/proto"
 	"github.com/wh3r3ar3you/uptimeforge/internal/store"
 	"gopkg.in/yaml.v3"
 )
@@ -764,5 +769,106 @@ func TestAgentImageFollowsHubVersion(t *testing.T) {
 		if got := agentImageFor(v); got != "intoxxx/uptimeforge-agent:latest" {
 			t.Fatalf("%s: %q", v, got)
 		}
+	}
+}
+
+// agentHello connects to the agent endpoint with token and extra headers and
+// says hello, as an agent does.
+func agentHello(t *testing.T, base, token string, hdr http.Header) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	h := http.Header{"Authorization": {"Bearer " + token}}
+	for k, v := range hdr {
+		h[k] = v
+	}
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(base, "http")+"/api/agent/ws", &websocket.DialOptions{HTTPHeader: h})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.CloseNow() })
+	msg, _ := proto.Encode(proto.TypeHello, proto.Hello{Proto: proto.Version, Version: "test"})
+	if err := conn.Write(ctx, websocket.MessageText, msg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The hub learns an agent's public address the way it learns a browser's: a
+// trusted reverse proxy's X-Forwarded-For counts, anybody else's does not.
+func TestAgentClientIPBehindProxy(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		proxies []netip.Prefix
+		want    string
+	}{
+		{"trusted proxy", nil, "203.0.113.7"},        // loopback is a trusted proxy by default
+		{"untrusted", []netip.Prefix{}, "127.0.0.1"}, // UF_TRUSTED_PROXIES=none
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := app.New(app.Options{DatabaseURL: pgtest.URL(t), DataDir: t.TempDir()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Store.Close()
+			got := make(chan string, 1)
+			a.Hub.OnAgentAddr = func(probe string, ip netip.Addr) { got <- probe + " " + ip.String() }
+			token, err := a.SaveProbe(context.Background(), hub.ProbeConfig{ID: "home", Role: hub.RoleChecker}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := httptest.NewServer(New(a, Options{SetupToken: testSetupToken, TrustedProxies: tc.proxies}).Handler())
+			defer srv.Close()
+			agentHello(t, srv.URL, token, http.Header{"X-Forwarded-For": {"203.0.113.7"}})
+			select {
+			case s := <-got:
+				if s != "home "+tc.want {
+					t.Fatalf("OnAgentAddr got %q, want %q", s, "home "+tc.want)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("OnAgentAddr was not called")
+			}
+		})
+	}
+}
+
+// Where a probe point sits is for everyone; its address only for admins.
+func TestViewerDoesNotSeeAgentIP(t *testing.T) {
+	a, srv, _ := startHub(t)
+	admin := newClient(t, srv.URL)
+	setupAdmin(admin)
+	if code := admin.do("POST", "/api/v1/probes", map[string]any{"id": "home", "role": "checker"}, nil); code != 201 {
+		t.Fatalf("create probe: %d", code)
+	}
+	a.Hub.SetNetwork("home", geoip.Network{IP: netip.MustParseAddr("203.0.113.7"), Country: "ru", ASN: "as8359", Org: "MTS PJSC"})
+	viewer := viewerClient(admin)
+	type probes struct {
+		Probes []struct {
+			ID      string           `json:"id"`
+			Network *hub.NetworkView `json:"network"`
+		} `json:"probes"`
+	}
+	network := func(c *client, path string) (*hub.NetworkView, string) {
+		var raw json.RawMessage
+		c.do("GET", path, nil, &raw)
+		var ps probes
+		json.Unmarshal(raw, &ps)
+		for _, p := range ps.Probes {
+			if p.ID == "home" {
+				return p.Network, string(raw)
+			}
+		}
+		return nil, string(raw)
+	}
+	for _, path := range []string{"/api/v1/overview", "/api/v1/probes", "/api/v1/checks"} {
+		n, raw := network(viewer, path)
+		if n == nil || n.Country != "ru" || n.ISP != "mts" {
+			t.Errorf("viewer %s: network %+v", path, n)
+		}
+		if strings.Contains(raw, "203.0.113.7") {
+			t.Errorf("viewer reads the agent's address from %s", path)
+		}
+	}
+	if n, _ := network(admin, "/api/v1/overview"); n == nil || n.IP != "203.0.113.7" {
+		t.Errorf("admin overview: network %+v", n)
 	}
 }

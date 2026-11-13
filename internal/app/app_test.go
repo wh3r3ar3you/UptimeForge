@@ -22,7 +22,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wh3r3ar3you/uptimeforge/internal/agent"
 	"github.com/wh3r3ar3you/uptimeforge/internal/checks"
+	"github.com/wh3r3ar3you/uptimeforge/internal/geoip"
 	"github.com/wh3r3ar3you/uptimeforge/internal/hub"
 	"github.com/wh3r3ar3you/uptimeforge/internal/model"
 	"github.com/wh3r3ar3you/uptimeforge/internal/remnawave"
@@ -512,6 +514,10 @@ func (f fakeGeo) Country(_ context.Context, ip netip.Addr) (string, error) {
 	return f[ip.String()], nil
 }
 
+func (f fakeGeo) Network(_ context.Context, ip netip.Addr) (geoip.Network, error) {
+	return geoip.Network{IP: ip, Country: f[ip.String()]}, nil
+}
+
 // The country of a proxy comes from the address its link points at; a link
 // that cannot be read is a validation error that does not repeat it.
 func TestLocateProxy(t *testing.T) {
@@ -659,5 +665,66 @@ func TestSaveTemplateRejectsBrokenHTML(t *testing.T) {
 	cfg.Templates = map[string]map[string]string{"ru": {"card": "<p>{emoji} {name}</p>"}}
 	if err := a.SaveSettings(context.Background(), cfg); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// netGeo is a geo database that knows a few addresses fully.
+type netGeo map[string]geoip.Network
+
+func (f netGeo) Country(_ context.Context, ip netip.Addr) (string, error) {
+	return f[ip.String()].Country, nil
+}
+
+func (f netGeo) Network(_ context.Context, ip netip.Addr) (geoip.Network, error) {
+	n := f[ip.String()]
+	n.IP = ip
+	return n, nil
+}
+
+// A checker that connects is labelled by its network, and the labels are
+// saved with the probe: after a restart checks still find it before it
+// reconnects.
+func TestAppLabelsAgentNetwork(t *testing.T) {
+	dir, db := t.TempDir(), pgtest.URL(t)
+	ctx := context.Background()
+	a := newApp(t, Options{DatabaseURL: db, DataDir: dir})
+	a.geo = netGeo{"203.0.113.7": {Country: "ru", ASN: "as8359", Org: "MTS PJSC"}}
+	token, err := a.SaveProbe(ctx, hub.ProbeConfig{ID: "home", Name: "Дом", Role: hub.RoleChecker}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := a.Hub.Handler()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agents.ServeHTTP(w, r.WithContext(hub.WithClientIP(r.Context(), netip.MustParseAddr("203.0.113.7"))))
+	}))
+	actx, stop := context.WithCancel(ctx)
+	go agent.New(actx, agent.Config{HubURL: srv.URL, Token: token, MetricsInterval: -1}, a.Log).Run(actx)
+	saved := func(p *hub.ProbeConfig) bool {
+		return p.Labels["country"] == "ru" && p.Labels["asn"] == "as8359" && p.Labels["isp"] == "mts"
+	}
+	var obj hub.ProbeConfig
+	if !eventually(10*time.Second, func() bool {
+		obj = hub.ProbeConfig{}
+		return a.Store.GetObject(ctx, kindProbe, "home", &obj) == nil && saved(&obj)
+	}) {
+		t.Fatalf("stored probe labels: %v", obj.Labels)
+	}
+	stop()
+	srv.Close()
+	a.Store.Close()
+
+	b := newApp(t, Options{DatabaseURL: db, DataDir: dir})
+	defer b.Store.Close()
+	found := false
+	for _, p := range b.Probes() {
+		if p.ID == "home" {
+			found = true
+			if !saved(&p.ProbeConfig) {
+				t.Fatalf("labels lost across a restart: %v", p.Labels)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the probe is gone after a restart")
 	}
 }

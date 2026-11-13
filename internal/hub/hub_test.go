@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/wh3r3ar3you/uptimeforge/internal/agent"
 	"github.com/wh3r3ar3you/uptimeforge/internal/checks"
+	"github.com/wh3r3ar3you/uptimeforge/internal/geoip"
 	"github.com/wh3r3ar3you/uptimeforge/internal/model"
 	"github.com/wh3r3ar3you/uptimeforge/internal/proto"
 	"github.com/wh3r3ar3you/uptimeforge/internal/xray"
@@ -2917,5 +2919,166 @@ func TestProbeBecomingCheckerClosesItsIncidentsQuietly(t *testing.T) {
 	}
 	if rec.find(model.EventResolve, "probe:ru-a") != nil || rec.find(model.EventResolve, "probe-net:ru-a") != nil {
 		t.Fatal("closing them must not notify")
+	}
+}
+
+func mtsNet() geoip.Network {
+	return geoip.Network{IP: netip.MustParseAddr("203.0.113.7"), Country: "ru", ASN: "as8359", Org: "MTS PJSC"}
+}
+
+// A checker is labelled by the network it connects from, so a check can pick
+// "the MTS subscribers"; a label the admin set by hand stays.
+func TestSetNetworkLabelsChecker(t *testing.T) {
+	cfg := &Config{DataDir: t.TempDir(), Baseline: []checks.Spec{},
+		Probes: []ProbeConfig{
+			{ID: "chk", Token: "token-chk-0123456789", Role: RoleChecker},
+			{ID: "kz", Token: "token-kz-00123456789", Role: RoleChecker, Labels: map[string]string{"country": "kz"}, LabelsLocked: []string{"country"}},
+		},
+		Checks: []CheckConfig{tcpCheck("mts", "isp=mts")}}
+	h, err := New(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := assignedIDs(h, "chk"); len(got) != 0 {
+		t.Fatalf("before its network is known the checker got %v", got)
+	}
+	before := h.Snapshot()
+	h.SetNetwork("chk", mtsNet())
+	h.SetNetwork("kz", mtsNet())
+
+	h.mu.Lock()
+	chk, kz := maps.Clone(h.probes["chk"].cfg.Labels), maps.Clone(h.probes["kz"].cfg.Labels)
+	h.mu.Unlock()
+	if chk["country"] != "ru" || chk["asn"] != "as8359" || chk["isp"] != "mts" {
+		t.Fatalf("checker labels %v", chk)
+	}
+	if kz["country"] != "kz" || kz["isp"] != "mts" {
+		t.Fatalf("a locked label was overwritten: %v", kz)
+	}
+	if got := assignedIDs(h, "chk"); !slices.Equal(got, []string{"mts"}) {
+		t.Fatalf("checker on MTS got %v, want [mts]", got)
+	}
+	// What was handed out before is a copy: the API marshals it unlocked.
+	for _, p := range before.Probes {
+		if p.Labels["isp"] != "" {
+			t.Fatalf("an earlier snapshot changed under its reader: %v", p.Labels)
+		}
+	}
+	snap := h.Snapshot()
+	for _, p := range snap.Probes {
+		if n := p.Network; p.ID == "chk" && (n == nil || n.IP != "203.0.113.7" || n.Country != "ru" || n.ASN != "as8359" || n.Org != "MTS PJSC" || n.ISP != "mts") {
+			t.Fatalf("network view %+v", n)
+		}
+	}
+}
+
+// A checker that moves to another operator stops running what was meant for
+// the old one, and what it measured there is no evidence any more: its line
+// leaves the check, and the incident it alone kept open closes as soon as the
+// remaining probes say so, not earlier.
+func TestCheckerNetworkChangeDropsOldState(t *testing.T) {
+	h := checkerHub(t, false, tcpCheck("node", "isp=mts"))
+	rec := &recorder{}
+	h.AddNotifier(rec)
+	h.SetNetwork("chk", mtsNet())
+	h.mu.Lock()
+	for _, p := range h.probes {
+		p.online, p.since = true, time.Now().Add(-time.Hour)
+	}
+	h.mu.Unlock()
+	for range 2 {
+		h.Ingest("chk", []checks.Result{res("node", false)})
+		h.Ingest("srv", []checks.Result{res("node", true)})
+	}
+	h.mu.Lock()
+	h.incidents["node"].Started = time.Now().Add(-time.Hour)
+	h.mu.Unlock()
+	h.tick()
+	if ev := rec.find(model.EventOpen, "node"); ev == nil || len(failingSet(ev.Incident.Lines)) != 1 {
+		t.Fatalf("setup: expected an outage seen by the checker alone, got %+v", ev)
+	}
+
+	// The server agent goes quiet, then the checker moves to Beeline.
+	h.mu.Lock()
+	h.probes["srv"].online = false
+	h.mu.Unlock()
+	h.SetNetwork("chk", geoip.Network{IP: netip.MustParseAddr("198.51.100.4"), Country: "ru", ASN: "as3216", Org: "Beeline"})
+
+	if got := assignedIDs(h, "chk"); slices.Contains(got, "node") {
+		t.Fatalf("the checker still runs the MTS check after moving to Beeline: %v", got)
+	}
+	h.mu.Lock()
+	_, kept := h.checks["node"].state["chk"]
+	h.mu.Unlock()
+	if kept {
+		t.Fatal("the checker's MTS result is still part of the check")
+	}
+	h.tick()
+	if ev := rec.find(model.EventResolve, "node"); ev != nil {
+		t.Fatalf("resolved with nobody left to say the node works: %+v", ev.Incident.Lines)
+	}
+
+	// The server agent is back and the node works for it: a real recovery.
+	h.mu.Lock()
+	h.probes["srv"].online = true
+	h.mu.Unlock()
+	h.Ingest("srv", []checks.Result{res("node", true)})
+	ev := rec.find(model.EventResolve, "node")
+	if ev == nil {
+		t.Fatal("the incident stayed open on the line of a probe that no longer runs the check")
+	}
+	for _, l := range ev.Incident.Lines {
+		if !l.OK {
+			t.Fatalf("resolved with a failing line: %+v", ev.Incident.Lines)
+		}
+	}
+}
+
+// Our own servers keep the labels the admin gave them; their network is only
+// shown.
+func TestServerAgentNetworkNoLabels(t *testing.T) {
+	h := checkerHub(t, false, tcpCheck("node", "isp=mts"))
+	h.SetNetwork("srv", geoip.Network{IP: netip.MustParseAddr("198.51.100.4"), Country: "de", ASN: "as24940", Org: "Hetzner Online GmbH"})
+	h.mu.Lock()
+	labels := maps.Clone(h.probes["srv"].cfg.Labels)
+	h.mu.Unlock()
+	if labels["isp"] != "mts" || labels["country"] != "" || labels["asn"] != "" {
+		t.Fatalf("a server agent was relabelled: %v", labels)
+	}
+	if got := assignedIDs(h, "srv"); !slices.Equal(got, []string{"node"}) {
+		t.Fatalf("server agent got %v", got)
+	}
+	for _, p := range h.Snapshot().Probes {
+		if n := p.Network; p.ID == "srv" && (n == nil || n.IP != "198.51.100.4" || n.Country != "de" || n.ASN != "as24940" || n.ISP != "hetzner-online") {
+			t.Fatalf("server agent network view %+v", n)
+		}
+	}
+}
+
+// The app may apply a config composed from a probe object saved before the
+// network was known: the checker keeps its labels. A lookup for an address
+// the agent has since left is ignored.
+func TestNetworkLabelsKeptAcrossApply(t *testing.T) {
+	h := checkerHub(t, false, tcpCheck("node", "isp=mts"))
+	h.SetNetwork("chk", geoip.Network{IP: netip.MustParseAddr("198.51.100.4"), Country: "ru", ASN: "as3216", Org: "Beeline"})
+	h.mu.Lock()
+	cfg := h.cfg.Clone()
+	h.mu.Unlock()
+	cfg.Probes[0].Labels = map[string]string{"isp": "mts"} // the stale object
+	if err := h.Apply(cfg); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	isp := h.probes["chk"].cfg.Labels["isp"]
+	h.probes["chk"].addr = netip.MustParseAddr("192.0.2.1") // reconnected from elsewhere
+	h.mu.Unlock()
+	if isp != "beeline" {
+		t.Fatalf("Apply dropped the network label: isp=%s", isp)
+	}
+	h.SetNetwork("chk", mtsNet()) // the lookup for the old address finishes late
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if isp := h.probes["chk"].cfg.Labels["isp"]; isp != "beeline" {
+		t.Fatalf("a stale lookup relabelled the checker: isp=%s", isp)
 	}
 }

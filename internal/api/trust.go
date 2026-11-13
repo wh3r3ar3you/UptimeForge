@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"regexp"
 	"strings"
+
+	"github.com/wh3r3ar3you/uptimeforge/internal/hub"
 )
 
 // defaultProxies are trusted to set X-Forwarded-* when UF_TRUSTED_PROXIES is
@@ -94,12 +96,18 @@ func (t trust) fromProxy(r *http.Request) bool {
 // the first hop no trusted proxy vouches for is the client. Entries left of
 // it are whatever the client chose to send.
 func (t trust) clientIP(r *http.Request) string {
-	ip, host := remoteAddr(r)
-	if !ip.IsValid() {
-		return host
-	}
-	if !t.trusted(ip) {
+	if ip := t.clientAddr(r); ip.IsValid() {
 		return ip.String()
+	}
+	_, host := remoteAddr(r)
+	return host
+}
+
+// clientAddr is clientIP as an address; invalid when RemoteAddr is not one.
+func (t trust) clientAddr(r *http.Request) netip.Addr {
+	ip, _ := remoteAddr(r)
+	if !ip.IsValid() || !t.trusted(ip) {
+		return ip
 	}
 	var hops []string
 	for _, v := range r.Header.Values("X-Forwarded-For") {
@@ -115,7 +123,18 @@ func (t trust) clientIP(r *http.Request) string {
 			break
 		}
 	}
-	return ip.String()
+	return ip
+}
+
+// agentAddr hands the agent endpoint the agent's address, as seen past the
+// trusted proxies: its network is looked up by it.
+func (s *Server) agentAddr(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ip := s.trust.clientAddr(r); ip.IsValid() {
+			r = r.WithContext(hub.WithClientIP(r.Context(), ip))
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func parseHop(s string) (netip.Addr, bool) {

@@ -309,3 +309,15 @@ func redactRemnawave(v app.RemnawaveView) app.RemnawaveView {
 	v.Nodes = nodes
 	return v
 }
+
+// redactProbeStatus hides where agents connect from: a checker's address is
+// its owner's home. The country and the operator stay.
+func redactProbeStatus(ps []hub.ProbeStatus) {
+	for i := range ps {
+		if n := ps[i].Network; n != nil && n.IP != "" {
+			c := *n
+			c.IP = ""
+			ps[i].Network = &c
+		}
+	}
+}

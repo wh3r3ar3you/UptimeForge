@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -116,13 +117,17 @@ func (h *Hub) handleAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ac := &agentConn{conn: conn, assign: make(chan []byte, 1), out: make(chan []byte, 16), cancel: cancel}
-	if !h.attach(p, ac, hello, hash) {
+	ip := ClientIP(r)
+	if !h.attach(p, ac, hello, hash, ip) {
 		conn.Close(websocket.StatusPolicyViolation, "probe token revoked")
 		return
 	}
 	defer h.detach(p, ac)
-	log := h.log.With("probe", id, "remote", r.RemoteAddr)
+	log := h.log.With("probe", id, "remote", ip.String())
 	log.Info("agent connected", "version", hello.Version, "host", hello.Hostname, "os", hello.OS+"/"+hello.Arch)
+	if h.OnAgentAddr != nil && ip.IsValid() {
+		h.OnAgentAddr(id, ip)
+	}
 
 	go func() {
 		ping := time.NewTicker(30 * time.Second)
@@ -201,8 +206,10 @@ func (h *Hub) handleAgent(w http.ResponseWriter, r *http.Request) {
 
 // attach makes ac the probe's connection. The token is checked again here,
 // under the lock: it may have been rotated, or the probe removed or made
-// virtual, while the agent was still in the handshake.
-func (h *Hub) attach(p *probe, ac *agentConn, hello proto.Hello, tokenHash string) bool {
+// virtual, while the agent was still in the handshake. ip is where the agent
+// connects from; from another address its network is unknown until
+// SetNetwork.
+func (h *Hub) attach(p *probe, ac *agentConn, hello proto.Hello, tokenHash string, ip netip.Addr) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.probes[p.cfg.ID] != p || p.cfg.Virtual() || p.cfg.TokenHash == "" ||
@@ -214,6 +221,12 @@ func (h *Hub) attach(p *probe, ac *agentConn, hello proto.Hello, tokenHash strin
 	}
 	now := time.Now()
 	p.conn, p.online, p.since, p.hello = ac, true, now, hello
+	if ip = ip.Unmap(); ip != p.addr {
+		p.addr, p.network = ip, nil
+		if ip.IsValid() {
+			p.network = &NetworkView{IP: ip.String(), At: now}
+		}
+	}
 	h.seen[p.cfg.ID] = true
 	p.lastAssign = nil
 	h.transition("probe:"+p.cfg.ID, model.KindOK, "", nil, meta{}, now)
@@ -256,6 +269,8 @@ type ProbeStatus struct {
 	MetricsAt time.Time         `json:"metrics_at,omitzero"`
 	Checks    int               `json:"checks"`
 	Failing   int               `json:"failing"`
+	// Network is where an agent connects from (nil until it has).
+	Network *NetworkView `json:"network,omitempty"`
 }
 
 type CheckStatus struct {
@@ -300,6 +315,10 @@ func (h *Hub) Snapshot() Status {
 			SysInfo: p.sysinfo, Metrics: p.metrics, MetricsAt: p.metricsAt}
 		if p.cfg.Local {
 			ps.Version = version.Version
+		}
+		if p.network != nil {
+			n := *p.network
+			ps.Network = &n
 		}
 		for _, cid := range h.checkOrder {
 			ch := h.checks[cid]

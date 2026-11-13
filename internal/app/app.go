@@ -64,7 +64,7 @@ type App struct {
 	rec       *recorder
 	rw        remnawaveState
 	nodes     nodeSnapshot
-	geo       countryDB
+	geo       geoDB
 }
 
 const (
@@ -123,6 +123,7 @@ func New(opt Options, log *slog.Logger) (*App, error) {
 	a.Hub.Restore(open, mutes)
 	a.Hub.SetRecorder(a.rec)
 	a.Hub.SetEnricher(a.enrichIncident)
+	a.Hub.OnAgentAddr = a.agentAddr
 	if seen, err := a.Store.ProbesSeen(context.Background()); err == nil {
 		a.Hub.MarkSeen(seen)
 	} else {

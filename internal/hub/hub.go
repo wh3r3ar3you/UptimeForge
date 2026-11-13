@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +67,11 @@ type Hub struct {
 
 	pmu     sync.Mutex
 	pending map[string]chan checks.Result // run-once requests waiting for agents
+
+	// OnAgentAddr is told the public address of every agent that connects,
+	// outside the hub lock; the app looks up its network and calls
+	// SetNetwork. Set it before the hub serves agents.
+	OnAgentAddr func(probeID string, ip netip.Addr)
 }
 
 type probe struct {
@@ -83,6 +89,8 @@ type probe struct {
 	noNet      bool
 	lastAssign []byte
 	host       map[string]*hostState // threshold timers per metric
+	addr       netip.Addr            // the agent's public address at its last connect
+	network    *NetworkView          // what is known about addr (SetNetwork)
 }
 
 type check struct {
@@ -221,6 +229,7 @@ func (h *Hub) Apply(cfg *Config) error {
 		}
 		tokenChanged := p.cfg != nil && p.cfg.TokenHash != pc.TokenHash
 		p.cfg, p.via = pc, vias[pc.ID]
+		keepNetworkLabels(p)
 		if pc.Virtual() {
 			if p.conn != nil {
 				p.conn.cancel()

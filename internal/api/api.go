@@ -65,7 +65,7 @@ func New(a *app.App, opt Options) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	hub := s.app.Hub.Handler()
-	mux.Handle("GET /api/agent/ws", hub)
+	mux.Handle("GET /api/agent/ws", s.agentAddr(hub))
 	mux.Handle("GET /metrics", s.metricsGuard(hub))
 	mux.Handle("GET /healthz", hub)
 
