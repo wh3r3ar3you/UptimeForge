@@ -18,7 +18,16 @@ const (
 	TypeMetrics   = "metrics"    // agent -> hub, host metrics every few seconds
 	TypeRun       = "run"        // hub -> agent, run one check now (UI tools)
 	TypeRunResult = "run_result" // agent -> hub
+	TypeLive      = "live"       // hub -> agent, send host metrics fast for a while
 )
+
+// Live asks for host metrics every IntervalMS for TTLMS; each new Live
+// restarts the TTL, and when it runs out the agent returns to its own
+// interval. Ignored by an agent whose metrics are switched off.
+type Live struct {
+	IntervalMS int `json:"interval_ms"`
+	TTLMS      int `json:"ttl_ms"`
+}
 
 type Envelope struct {
 	Type string          `json:"t"`

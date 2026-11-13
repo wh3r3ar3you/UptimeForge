@@ -43,6 +43,9 @@ type Config struct {
 	Token           string
 	MetricsInterval time.Duration // host metrics period; 0 = 15s, <0 = off
 	NICs            []string      // interfaces counted as traffic; empty = auto
+	// MinLive is the floor for a live command's interval; 0 = 500ms. A test
+	// hook: production leaves it unset.
+	MinLive time.Duration
 	// SourceIP is the local address the hub connection leaves from. Empty
 	// means auto: the kernel's choice first and, when the hub cannot be
 	// reached, each public address of the host in turn (VPN servers often
@@ -68,9 +71,13 @@ type Agent struct {
 	mu      sync.Mutex
 	pending []checks.Result
 	metrics []sample
-	notify  chan struct{}
-	out     chan []byte // immediate messages (run results)
-	runs    chan struct{}
+	// Live window (see setLive); liveSet wakes the metrics loop to re-arm.
+	liveEvery time.Duration
+	liveUntil time.Time
+	liveSet   chan struct{}
+	notify    chan struct{}
+	out       chan []byte // immediate messages (run results)
+	runs      chan struct{}
 
 	// Auto source address: candidates ("" is the kernel's choice) and the
 	// one in use. Only the Run goroutine touches them.
@@ -89,7 +96,7 @@ func New(ctx context.Context, cfg Config, log *slog.Logger) *Agent {
 	if cfg.MetricsInterval == 0 {
 		cfg.MetricsInterval = 15 * time.Second
 	}
-	a := &Agent{cfg: cfg, log: log, notify: make(chan struct{}, 1), out: make(chan []byte, 16), runs: make(chan struct{}, maxRuns)}
+	a := &Agent{cfg: cfg, log: log, notify: make(chan struct{}, 1), liveSet: make(chan struct{}, 1), out: make(chan []byte, 16), runs: make(chan struct{}, maxRuns)}
 	a.runner = runner.New(ctx, log, a.enqueue)
 	a.runner.Deny(cfg.DenyTypes)
 	if cfg.MetricsInterval > 0 {
@@ -159,26 +166,84 @@ func (a *Agent) enqueue(r checks.Result) {
 
 // collect samples host metrics on its own schedule; like results they are
 // buffered while the hub is unreachable.
+//
+// One timer serves both rates: a live command re-arms it, and after each
+// sample it is re-armed for the live interval while the live window lasts,
+// for the normal one otherwise. Nothing is started per command, so switching
+// leaks no goroutine or ticker.
 func (a *Agent) collect(ctx context.Context) {
-	t := time.NewTicker(a.cfg.MetricsInterval)
+	t := time.NewTimer(a.cfg.MetricsInterval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-a.liveSet:
+			// Go 1.23+ timers: Reset discards a pending tick.
+			t.Reset(a.nextMetricsIn(time.Now()))
+			continue
 		case <-t.C:
 		}
-		if a.metricsOff.Load() {
-			continue
+		if !a.metricsOff.Load() {
+			m := a.sys.Collect(ctx)
+			now := time.Now()
+			a.mu.Lock()
+			a.metrics = append(a.metrics, sample{m, now})
+			if over := len(a.metrics) - 240; over > 0 {
+				a.metrics = a.metrics[over:]
+			}
+			live := now.Before(a.liveUntil)
+			a.mu.Unlock()
+			if live { // flush now instead of at the next batch tick
+				select {
+				case a.notify <- struct{}{}:
+				default:
+				}
+			}
 		}
-		m := a.sys.Collect(ctx)
-		a.mu.Lock()
-		a.metrics = append(a.metrics, sample{m, time.Now()})
-		if over := len(a.metrics) - 240; over > 0 {
-			a.metrics = a.metrics[over:]
-		}
-		a.mu.Unlock()
+		t.Reset(a.nextMetricsIn(time.Now()))
 	}
+}
+
+// nextMetricsIn is the wait before the next sample: the live interval when
+// the next sample still falls inside the live window, else the normal one.
+func (a *Agent) nextMetricsIn(now time.Time) time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.liveEvery > 0 && !a.metricsOff.Load() && !now.Add(a.liveEvery).After(a.liveUntil) {
+		return a.liveEvery
+	}
+	return a.cfg.MetricsInterval
+}
+
+// minLive is the shortest live interval accepted in production.
+const minLive = 500 * time.Millisecond
+
+// setLive starts or extends a live window. Ignored when the hub switched
+// metrics off or this agent collects none.
+func (a *Agent) setLive(l proto.Live) {
+	if a.sys == nil || a.metricsOff.Load() || l.IntervalMS <= 0 || l.TTLMS <= 0 {
+		return
+	}
+	floor := minLive
+	if a.cfg.MinLive > 0 {
+		floor = a.cfg.MinLive
+	}
+	every := max(time.Duration(l.IntervalMS)*time.Millisecond, floor)
+	a.mu.Lock()
+	a.liveEvery = every
+	a.liveUntil = time.Now().Add(time.Duration(l.TTLMS) * time.Millisecond)
+	a.mu.Unlock()
+	select {
+	case a.liveSet <- struct{}{}:
+	default:
+	}
+}
+
+func (a *Agent) liveState() (every time.Duration, until time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.liveEvery, a.liveUntil
 }
 
 // Run keeps a connection to the hub until ctx is cancelled.
@@ -295,6 +360,11 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 				}
 			}
 			a.log.Info("assignment received", "probe", as.Probe, "checks", len(as.Checks))
+		case proto.TypeLive:
+			var l proto.Live
+			if json.Unmarshal(env.Data, &l) == nil {
+				a.setLive(l)
+			}
 		case proto.TypeRun:
 			var run proto.Run
 			if err := json.Unmarshal(env.Data, &run); err != nil {
