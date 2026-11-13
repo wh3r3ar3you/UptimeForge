@@ -19,6 +19,7 @@ import (
 	"github.com/wh3r3ar3you/uptimeforge/internal/proto"
 	"github.com/wh3r3ar3you/uptimeforge/internal/runner"
 	"github.com/wh3r3ar3you/uptimeforge/internal/sysmon"
+	"github.com/wh3r3ar3you/uptimeforge/internal/version"
 	"github.com/wh3r3ar3you/uptimeforge/internal/xray"
 )
 
@@ -72,6 +73,11 @@ type Hub struct {
 	// replace them.
 	now        func() time.Time
 	liveTicker func(time.Duration) (<-chan time.Time, func())
+
+	// version is the hub's own release, which agents are updated to
+	// (rollout.go); tests replace it.
+	version string
+	roll    rollout
 
 	// OnAgentAddr is told the public address of every agent that connects,
 	// outside the hub lock; the app looks up its network and calls
@@ -143,6 +149,7 @@ func New(cfg *Config, log *slog.Logger) (*Hub, error) {
 		mutes:     map[string]time.Time{},
 		pending:   map[string]chan checks.Result{},
 		now:       time.Now,
+		version:   version.Version,
 		liveTicker: func(d time.Duration) (<-chan time.Time, func()) {
 			t := time.NewTicker(d)
 			return t.C, t.Stop
@@ -427,6 +434,7 @@ func (h *Hub) tick() {
 		}
 	}
 	h.evaluateAll(now)
+	h.rolloutStep(h.now())
 
 	for _, inc := range h.incidents {
 		if !inc.Notified && !h.holdBack(inc, now) {

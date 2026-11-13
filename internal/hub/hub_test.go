@@ -3689,3 +3689,565 @@ func TestWatchersCount(t *testing.T) {
 		t.Fatalf("Watchers of an unknown probe = %d", n)
 	}
 }
+
+// rollRig drives agent updates: agents on fake connections, the hub's clock
+// in the test's hands, ticks called directly.
+type rollRig struct {
+	t     *testing.T
+	h     *Hub
+	rec   *recorder
+	mu    sync.Mutex
+	clock time.Time
+	conns map[string]*agentConn
+}
+
+const rollTarget = "0.2.0"
+
+func rollToken(id string) string { return "token-" + id + "-0123456789" }
+
+// rolloutCfg has agents a01..aNN; mod changes it.
+func rolloutCfg(t *testing.T, n int, mod func(*Config)) *Config {
+	cfg := &Config{DataDir: t.TempDir(), Baseline: []checks.Spec{}}
+	for i := 1; i <= n; i++ {
+		id := fmt.Sprintf("a%02d", i)
+		cfg.Probes = append(cfg.Probes, ProbeConfig{ID: id, Token: rollToken(id)})
+	}
+	if mod != nil {
+		mod(cfg)
+	}
+	return cfg
+}
+
+func newRollRig(t *testing.T, cfg *Config) *rollRig {
+	t.Helper()
+	h, err := New(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &rollRig{t: t, h: h, rec: &recorder{}, clock: time.Now(), conns: map[string]*agentConn{}}
+	h.version = rollTarget
+	h.now = func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.clock }
+	h.AddNotifier(r.rec)
+	return r
+}
+
+func (r *rollRig) advance(d time.Duration) { r.mu.Lock(); r.clock = r.clock.Add(d); r.mu.Unlock() }
+func (r *rollRig) tick()                   { r.h.tick() }
+
+// start lets the agents' reconnect window after the hub start pass and ticks.
+func (r *rollRig) start() {
+	r.advance(startupGrace)
+	r.tick()
+}
+
+func (r *rollRig) connect(id, ver string, launcher bool) {
+	r.t.Helper()
+	r.h.mu.Lock()
+	p := r.h.probes[id]
+	r.h.mu.Unlock()
+	if old := r.conns[id]; old != nil {
+		r.h.detach(p, old)
+	}
+	ac := &agentConn{assign: make(chan []byte, 1), out: make(chan []byte, 16), cancel: func() {}}
+	if !r.h.attach(p, ac, proto.Hello{Proto: proto.Version, Version: ver, Launcher: launcher}, HashToken(rollToken(id)), netip.Addr{}) {
+		r.t.Fatalf("attach %s refused", id)
+	}
+	r.conns[id] = ac
+}
+
+func (r *rollRig) drop(id string) {
+	r.h.mu.Lock()
+	p := r.h.probes[id]
+	r.h.mu.Unlock()
+	r.h.detach(p, r.conns[id])
+	delete(r.conns, id)
+}
+
+// restart is an agent coming back on the target after installing it.
+func (r *rollRig) restart(ids ...string) {
+	for _, id := range ids {
+		r.drop(id)
+		r.connect(id, rollTarget, true)
+	}
+}
+
+// sent drains every agent's queue and returns, sorted, who was told to update.
+func (r *rollRig) sent() []string {
+	r.t.Helper()
+	var got []string
+	for _, id := range slices.Sorted(maps.Keys(r.conns)) {
+		for {
+			var msg []byte
+			select {
+			case msg = <-r.conns[id].out:
+			default:
+			}
+			if msg == nil {
+				break
+			}
+			var env proto.Envelope
+			var u proto.Update
+			if json.Unmarshal(msg, &env) != nil || env.Type != proto.TypeUpdate || json.Unmarshal(env.Data, &u) != nil {
+				r.t.Fatalf("%s got something other than an update: %s", id, msg)
+			}
+			if u.Version != rollTarget {
+				r.t.Fatalf("%s told to update to %q", id, u.Version)
+			}
+			got = append(got, id)
+		}
+	}
+	return got
+}
+
+func (r *rollRig) expectSent(want ...string) {
+	r.t.Helper()
+	if got := r.sent(); !slices.Equal(got, want) {
+		r.t.Fatalf("updates went to %v, want %v (status %+v)", got, want, r.h.Rollout())
+	}
+}
+
+func ids(from, to int) []string {
+	var out []string
+	for i := from; i <= to; i++ {
+		out = append(out, fmt.Sprintf("a%02d", i))
+	}
+	return out
+}
+
+// One agent first, then 10%, then everyone, each after the previous stage is
+// back on the new version and ran 10 minutes on it.
+func TestRolloutStages(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 21, nil))
+	for _, id := range ids(1, 20) { // a21 is offline for now
+		r.connect(id, "0.1.0", true)
+	}
+	r.expectSent() // agents are still reconnecting after the hub start
+	r.start()
+	r.expectSent("a01")
+	r.tick()
+	r.expectSent()
+	if st := r.h.Rollout(); st.Version != rollTarget || st.Mode != "all" || st.Stage != 1 || !slices.Equal(st.InFlight, []string{"a01"}) ||
+		st.Updated != 0 || st.Pending != 19 || st.Halted {
+		t.Fatalf("stage 1 status %+v", st)
+	}
+
+	r.advance(time.Minute)
+	r.restart("a01")
+	r.tick()
+	r.expectSent()
+	r.advance(10*time.Minute - time.Second)
+	r.tick()
+	r.expectSent() // the soak is not over
+	r.advance(time.Second)
+	r.tick()
+	r.expectSent("a02", "a03") // 10% of 20
+	if st := r.h.Rollout(); st.Stage != 2 || st.Updated != 1 || st.Pending != 17 || !slices.Equal(st.InFlight, []string{"a02", "a03"}) {
+		t.Fatalf("stage 2 status %+v", st)
+	}
+
+	r.advance(time.Minute)
+	r.restart("a02")
+	r.advance(time.Minute)
+	r.tick()
+	r.expectSent() // a03 is not back yet
+	r.restart("a03")
+	r.advance(10*time.Minute - time.Second)
+	r.tick()
+	r.expectSent() // 10 minutes count from the last one back
+	r.advance(time.Second)
+	r.tick()
+	r.expectSent(ids(4, 20)...)
+	if st := r.h.Rollout(); st.Stage != 3 || st.Updated != 3 || st.Pending != 0 || len(st.InFlight) != 17 {
+		t.Fatalf("stage 3 status %+v", st)
+	}
+
+	// From now on an agent that turns up on an old version is updated at once.
+	r.connect("a21", "0.1.0", true)
+	r.expectSent("a21")
+	r.restart(ids(4, 21)...)
+	r.tick()
+	r.expectSent()
+	if st := r.h.Rollout(); st.Updated != 21 || st.Pending != 0 || len(st.InFlight) != 0 || st.Halted || len(st.Failed) != 0 {
+		t.Fatalf("final status %+v", st)
+	}
+	if ev := r.rec.find(model.EventOpen, rolloutKey); ev != nil {
+		t.Fatalf("a rollout that went fine raised %+v", ev.Incident)
+	}
+}
+
+// haltedRig is a rollout of 20 agents halted because a01, updated first, is
+// not back on the new version 10 minutes later.
+func haltedRig(t *testing.T, back func(r *rollRig)) *rollRig {
+	t.Helper()
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.drop("a01")
+	if back != nil {
+		r.advance(3 * time.Minute)
+		back(r)
+		r.advance(7*time.Minute - time.Second)
+	} else {
+		r.advance(10*time.Minute - time.Second)
+	}
+	r.tick()
+	if r.h.Rollout().Halted || r.rec.find(model.EventOpen, rolloutKey) != nil {
+		t.Fatal("halted before 10 minutes")
+	}
+	r.advance(time.Second)
+	r.tick()
+	st := r.h.Rollout()
+	if !st.Halted || !slices.Equal(st.InFlight, []string{"a01"}) {
+		t.Fatalf("not halted: %+v", st)
+	}
+	return r
+}
+
+func TestRolloutHaltsOnMissingAgent(t *testing.T) {
+	r := haltedRig(t, nil)
+	ev := r.rec.find(model.EventOpen, rolloutKey)
+	if ev == nil {
+		t.Fatal("no incident for an agent that did not come back")
+	}
+	inc := ev.Incident
+	if inc.Severity != model.Warning || inc.Kind != model.KindAgentUpdate || !strings.Contains(inc.Name, rollTarget) ||
+		len(inc.Lines) != 1 || inc.Lines[0].Probe != "a01" || inc.Lines[0].OK || inc.Lines[0].Reason != "update_missing" {
+		t.Fatalf("incident %+v", inc)
+	}
+	r.advance(time.Hour)
+	r.tick()
+	r.expectSent() // halted: nobody else gets it
+
+	r.h.ResumeRollout()
+	st := r.h.Rollout()
+	if st.Halted || len(st.Failed) != 1 || st.Failed[0].Probe != "a01" || st.Failed[0].Error == "" || len(st.InFlight) != 1 {
+		t.Fatalf("after resume %+v", st)
+	}
+	if r.rec.find(model.EventResolve, rolloutKey) == nil {
+		t.Fatal("resume did not close the incident")
+	}
+	// Nothing is proven yet: stage 1 again, with the next agent.
+	r.expectSent("a02")
+	// The straggler turning up later on its old version is not sent the
+	// version again.
+	r.connect("a01", "0.1.0", true)
+	r.restart("a02")
+	r.advance(10 * time.Minute)
+	r.tick()
+	r.expectSent("a03", "a04")
+}
+
+// The launcher rolled the update back: the agent is back, on its old version.
+func TestRolloutHaltsOnRolledBackAgent(t *testing.T) {
+	r := haltedRig(t, func(r *rollRig) { r.connect("a01", "0.1.0", true) })
+	ev := r.rec.find(model.EventOpen, rolloutKey)
+	if ev == nil || len(ev.Incident.Lines) != 1 || ev.Incident.Lines[0].Reason != "update_rolled_back" {
+		t.Fatalf("incident %+v", ev)
+	}
+	r.tick()
+	r.expectSent()
+}
+
+// The straggler arriving late on the new version closes the incident; the
+// rollout stays halted until someone resumes it.
+func TestRolloutStragglerBackClosesIncident(t *testing.T) {
+	r := haltedRig(t, nil)
+	r.advance(5 * time.Minute)
+	r.connect("a01", rollTarget, true)
+	if r.rec.find(model.EventResolve, rolloutKey) == nil {
+		t.Fatal("the straggler is back on the new version, the incident is still open")
+	}
+	r.advance(time.Hour)
+	r.tick()
+	r.expectSent()
+	if st := r.h.Rollout(); !st.Halted || st.Updated != 1 || len(st.InFlight) != 0 {
+		t.Fatalf("status %+v", st)
+	}
+	r.h.ResumeRollout()
+	r.expectSent("a02", "a03") // a01 proved the version: on to 10%
+}
+
+func TestRolloutStragglerDeletedClosesIncident(t *testing.T) {
+	r := haltedRig(t, nil)
+	cfg := rolloutCfg(t, 20, func(c *Config) { c.Probes = c.Probes[1:] })
+	if err := r.h.Apply(cfg); err != nil {
+		t.Fatal(err)
+	}
+	r.tick()
+	if r.rec.find(model.EventResolve, rolloutKey) == nil {
+		t.Fatal("the straggler was deleted, the incident is still open")
+	}
+	if st := r.h.Rollout(); len(st.InFlight) != 0 {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+// A hub restart forgets the rollout, but not a halt: the open incident says
+// which agents did not come back.
+func TestRolloutHaltSurvivesRestart(t *testing.T) {
+	r := haltedRig(t, nil)
+	open := r.h.Snapshot().Incidents
+	r2 := newRollRig(t, rolloutCfg(t, 20, nil))
+	r2.h.Restore(open, nil)
+	r2.connect("a01", "0.1.0", true)
+	for _, id := range ids(2, 20) {
+		r2.connect(id, "0.1.0", true)
+	}
+	r2.start()
+	r2.expectSent()
+	if st := r2.h.Rollout(); !st.Halted || !slices.Equal(st.InFlight, []string{"a01"}) {
+		t.Fatalf("after restart %+v", st)
+	}
+	if r2.rec.find(model.EventResolve, rolloutKey) != nil {
+		t.Fatal("the restart closed the incident while a01 is still not back")
+	}
+	r2.connect("a01", rollTarget, true)
+	if r2.rec.find(model.EventResolve, rolloutKey) == nil {
+		t.Fatal("a01 is back on the new version, the incident is still open")
+	}
+
+	// A hub of another version leaves the old rollout behind.
+	r3 := newRollRig(t, rolloutCfg(t, 2, nil))
+	r3.h.version = "0.3.0"
+	r3.h.Restore(open, nil)
+	r3.start()
+	if r3.h.Rollout().Halted || len(r3.h.Snapshot().Incidents) != 0 {
+		t.Fatalf("a 0.3.0 hub kept the 0.2.0 halt: %+v", r3.h.Rollout())
+	}
+}
+
+func TestRolloutModes(t *testing.T) {
+	mixed := func(mode string) func(*Config) {
+		return func(c *Config) {
+			c.AgentUpdate = mode
+			c.Probes = []ProbeConfig{
+				{ID: "chk1", Token: rollToken("chk1"), Role: RoleChecker},
+				{ID: "chk2", Token: rollToken("chk2"), Role: RoleChecker},
+				{ID: "srv", Token: rollToken("srv")},
+				{ID: "hub", Local: true},
+			}
+		}
+	}
+	connectAll := func(r *rollRig) {
+		for _, id := range []string{"chk1", "chk2", "srv"} {
+			r.connect(id, "0.1.0", true)
+		}
+	}
+
+	t.Run("checkers", func(t *testing.T) {
+		r := newRollRig(t, rolloutCfg(t, 0, mixed(RoleChecker+"s")))
+		connectAll(r)
+		r.start()
+		r.expectSent("chk1")
+		r.restart("chk1")
+		r.advance(10 * time.Minute)
+		r.tick()
+		r.expectSent("chk2")
+		r.restart("chk2")
+		r.advance(time.Hour)
+		r.tick()
+		r.expectSent() // the server agent is not in scope
+		if st := r.h.Rollout(); st.Mode != "checkers" || st.Updated != 2 || st.Pending != 0 || len(st.NeedReinstall) != 0 {
+			t.Fatalf("status %+v", st)
+		}
+	})
+	t.Run("off", func(t *testing.T) {
+		r := newRollRig(t, rolloutCfg(t, 0, mixed("off")))
+		connectAll(r)
+		r.start()
+		r.advance(time.Hour)
+		r.tick()
+		r.expectSent()
+		if st := r.h.Rollout(); st.Mode != "off" || st.Stage != 0 || st.Pending != 0 {
+			t.Fatalf("status %+v", st)
+		}
+	})
+	t.Run("dev hub", func(t *testing.T) {
+		for _, v := range []string{"dev", "", "v0.2.0", "0.2.0-3-gabcdef1+dirty"} {
+			r := newRollRig(t, rolloutCfg(t, 0, mixed("")))
+			r.h.version = v
+			connectAll(r)
+			r.start()
+			r.advance(time.Hour)
+			r.tick()
+			r.expectSent()
+			if st := r.h.Rollout(); st.Mode != "all" || st.Stage != 0 || st.Pending != 0 {
+				t.Fatalf("hub %q: status %+v", v, st)
+			}
+		}
+	})
+	t.Run("default is all", func(t *testing.T) {
+		r := newRollRig(t, rolloutCfg(t, 0, mixed("")))
+		connectAll(r)
+		r.start()
+		r.expectSent("chk1")
+	})
+	t.Run("switched off mid-rollout", func(t *testing.T) {
+		r := haltedRig(t, nil)
+		cfg := rolloutCfg(t, 20, func(c *Config) { c.AgentUpdate = "off" })
+		if err := r.h.Apply(cfg); err != nil {
+			t.Fatal(err)
+		}
+		r.tick()
+		if r.rec.find(model.EventResolve, rolloutKey) == nil {
+			t.Fatal("updates switched off, the halt incident is still open")
+		}
+		r.advance(time.Hour)
+		r.tick()
+		r.expectSent()
+	})
+	t.Run("validation", func(t *testing.T) {
+		for _, mode := range []string{"", "all", "checkers", "off"} {
+			if err := (&Config{AgentUpdate: mode}).Normalize(); err != nil {
+				t.Fatalf("agent_update %q: %v", mode, err)
+			}
+		}
+		if err := (&Config{AgentUpdate: "servers"}).Normalize(); err == nil || !strings.Contains(err.Error(), "agent_update") {
+			t.Fatalf("agent_update servers: %v", err)
+		}
+	})
+}
+
+// Agents that cannot update themselves are listed for a reinstall; dev
+// builds and newer versions are left alone.
+func TestRolloutSkipsOldAgents(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 5, nil))
+	r.connect("a01", "0.1.0", false)
+	r.connect("a02", "0.1.0", true)
+	r.connect("a03", "dev", true)
+	r.connect("a04", "0.3.0", true)
+	r.connect("a05", "0.2.0-rc1", true)
+	r.start()
+	r.expectSent("a02")
+	if st := r.h.Rollout(); !slices.Equal(st.NeedReinstall, []string{"a01"}) || st.Pending != 1 {
+		t.Fatalf("status %+v", st)
+	}
+	r.restart("a02")
+	r.advance(10 * time.Minute)
+	r.tick()
+	r.expectSent("a05") // a pre-release of the target is older than it
+	r.restart("a05")
+	r.advance(time.Hour)
+	r.tick()
+	r.expectSent()
+	if st := r.h.Rollout(); !slices.Equal(st.NeedReinstall, []string{"a01"}) || st.Updated != 2 || st.Pending != 0 {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+// An agent that refuses the update (a signature it cannot verify, a failed
+// download) says so: it is not sent the version again, and the rollout goes
+// on. The refusal travels over the real agent connection.
+func TestRolloutUpdateError(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	srv := httptest.NewServer(r.h.Handler())
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/api/agent/ws",
+		&websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer " + rollToken("a01")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	hello, _ := proto.Encode(proto.TypeHello, proto.Hello{Proto: proto.Version, Version: "0.1.0", Launcher: true})
+	if err := c.Write(ctx, websocket.MessageText, hello); err != nil {
+		t.Fatal(err)
+	}
+	updates := make(chan proto.Update, 8)
+	go func() {
+		for {
+			_, msg, err := c.Read(ctx)
+			if err != nil {
+				return
+			}
+			var env proto.Envelope
+			var u proto.Update
+			if json.Unmarshal(msg, &env) == nil && env.Type == proto.TypeUpdate && json.Unmarshal(env.Data, &u) == nil {
+				updates <- u
+			}
+		}
+	}()
+	if !eventually(5*time.Second, func() bool { return r.h.Snapshot().Probes[0].Online }) {
+		t.Fatal("a01 never connected")
+	}
+	for _, id := range ids(2, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	select {
+	case u := <-updates:
+		if u.Version != rollTarget {
+			t.Fatalf("a01 told to update to %q", u.Version)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a01 got no update")
+	}
+	r.expectSent()
+
+	refusal, _ := proto.Encode(proto.TypeUpdateResult, proto.UpdateResult{Version: rollTarget, Error: "checksums: bad signature " + strings.Repeat("x", 2000)})
+	if err := c.Write(ctx, websocket.MessageText, refusal); err != nil {
+		t.Fatal(err)
+	}
+	if !eventually(5*time.Second, func() bool { return len(r.h.Rollout().Failed) == 1 }) {
+		t.Fatalf("the refusal was not recorded: %+v", r.h.Rollout())
+	}
+	st := r.h.Rollout()
+	if f := st.Failed[0]; f.Probe != "a01" || !strings.HasPrefix(f.Error, "checksums: bad signature") || len([]rune(f.Error)) > maxUpdateErrLen {
+		t.Fatalf("failure %+v", f)
+	}
+	if st.Halted || r.rec.find(model.EventOpen, rolloutKey) != nil {
+		t.Fatalf("a refused update halted the rollout: %+v", st)
+	}
+	// a01 proved nothing: stage 1 again, with the next agent.
+	r.expectSent("a02")
+	r.restart("a02")
+	r.advance(10 * time.Minute)
+	r.tick()
+	r.expectSent("a03", "a04")
+	r.restart("a03", "a04")
+	r.advance(10 * time.Minute)
+	r.tick()
+	r.expectSent(ids(5, 20)...)
+	select {
+	case u := <-updates:
+		t.Fatalf("a01 was sent %q again after refusing it", u.Version)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if st := r.h.Rollout(); len(st.Failed) != 1 || st.Halted {
+		t.Fatalf("final status %+v", st)
+	}
+}
+
+// Once everyone is being updated, a halt still stops what is sent to agents
+// that turn up on an old version.
+func TestRolloutHaltStopsOpenRollout(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 4, nil))
+	for _, id := range ids(1, 3) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02") // 10% of 3, at least one
+	r.restart("a02")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a03")
+	r.drop("a03")
+	r.advance(updateWait)
+	r.tick()
+	if !r.h.Rollout().Halted {
+		t.Fatalf("not halted: %+v", r.h.Rollout())
+	}
+	r.connect("a04", "0.1.0", true)
+	r.tick()
+	r.expectSent()
+	r.h.ResumeRollout()
+	r.expectSent("a04")
+}

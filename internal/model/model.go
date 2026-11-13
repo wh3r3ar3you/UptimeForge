@@ -18,6 +18,7 @@ const (
 	KindHost         Kind = "host"          // a server metric stayed past its threshold
 	KindUsersDrop    Kind = "users_drop"    // users online on a VPN node collapsed
 	KindNodeDown     Kind = "node_down"     // the Remnawave panel lost a node
+	KindAgentUpdate  Kind = "agent_update"  // agents sent an update did not come back on it
 )
 
 // Rank orders kinds by badness for "worst during the incident".
@@ -29,7 +30,7 @@ func (k Kind) Rank() int {
 		return 3
 	case KindPartial:
 		return 2
-	case KindProbeOffline, KindProbeNoNet, KindHost:
+	case KindProbeOffline, KindProbeNoNet, KindHost, KindAgentUpdate:
 		return 1
 	}
 	return 0

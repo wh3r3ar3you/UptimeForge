@@ -200,6 +200,11 @@ func (h *Hub) handleAgent(w http.ResponseWriter, r *http.Request) {
 			if json.Unmarshal(env.Data, &rr) == nil {
 				h.runResult(rr)
 			}
+		case proto.TypeUpdateResult:
+			var ur proto.UpdateResult
+			if json.Unmarshal(env.Data, &ur) == nil {
+				h.updateResult(id, ur)
+			}
 		}
 	}
 }
@@ -234,6 +239,7 @@ func (h *Hub) attach(p *probe, ac *agentConn, hello proto.Hello, tokenHash strin
 	if len(p.watchers) > 0 {
 		h.renewLive(p) // someone is already watching: no need to wait for the next renewal
 	}
+	h.rolloutStep(h.now()) // back from an update, or due for one
 	return true
 }
 

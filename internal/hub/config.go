@@ -43,6 +43,24 @@ type Config struct {
 	Telegram  *Telegram                    `yaml:"telegram" json:"telegram,omitempty"`
 	Webhook   *Webhook                     `yaml:"webhook" json:"webhook,omitempty"`
 	Remnawave *Remnawave                   `yaml:"remnawave" json:"remnawave,omitempty"`
+	// AgentUpdate is which agents the hub updates to its own version: all
+	// (the default when empty), checkers, or off.
+	AgentUpdate string `yaml:"agent_update" json:"agent_update,omitempty"`
+}
+
+// Agent update modes (Config.AgentUpdate).
+const (
+	AgentUpdateAll      = "all"
+	AgentUpdateCheckers = "checkers"
+	AgentUpdateOff      = "off"
+)
+
+// AgentUpdateMode is AgentUpdate with the default filled in.
+func (c *Config) AgentUpdateMode() string {
+	if c.AgentUpdate == "" {
+		return AgentUpdateAll
+	}
+	return c.AgentUpdate
 }
 
 // Heartbeat is the dead man's switch: the hub pings URL while it is healthy,
@@ -339,6 +357,11 @@ func (c *Config) normalize() error {
 			{Type: "tcp", TCP: &checks.TCPParams{Address: "1.1.1.1:443"}},
 			{Type: "tcp", TCP: &checks.TCPParams{Address: "8.8.8.8:443"}},
 		}
+	}
+	switch c.AgentUpdate {
+	case "", AgentUpdateAll, AgentUpdateCheckers, AgentUpdateOff:
+	default:
+		return fmt.Errorf("agent_update must be %s, %s or %s", AgentUpdateAll, AgentUpdateCheckers, AgentUpdateOff)
 	}
 
 	ids := map[string]bool{}
