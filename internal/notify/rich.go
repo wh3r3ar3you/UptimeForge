@@ -76,6 +76,9 @@ func (f *Formatter) resolvedTitle(inc *model.Incident) (emoji, title string) {
 	if inc.Type == "update" && inc.Note == "update_stopped" {
 		return "⏹", f.t("update_closed")
 	}
+	if updateClosedWithoutReturn(inc) {
+		return "☑️", f.t("update_done")
+	}
 	if inc.ResolvedBy != "" {
 		return "☑️", f.t("closed")
 	}
@@ -122,6 +125,8 @@ func (f *Formatter) resolvedLines(inc *model.Incident) []string {
 		lines = append(lines, f.t("update_resumed", esc(inc.ResolvedBy)))
 	case inc.Type == "update" && inc.Note == "update_stopped":
 		lines = append(lines, f.t("update_stopped"))
+	case inc.Type == "update" && (inc.Note == "update_left" || inc.Note == "update_refused" || inc.Note == "update_settled"):
+		lines = append(lines, f.t(inc.Note))
 	case inc.ResolvedBy != "":
 		lines = append(lines, f.t("closed_by", esc(inc.ResolvedBy)))
 	}
@@ -139,4 +144,14 @@ func (f *Formatter) RichResolved(inc *model.Incident) string {
 // RichTest is the test message in rich form.
 func (f *Formatter) RichTest(event string) string {
 	return "<p>" + f.Test(event) + "</p>"
+}
+
+// updateClosedWithoutReturn: the agents of a halted rollout did not come
+// back on the new version; they were deleted, moved on or refused it.
+func updateClosedWithoutReturn(inc *model.Incident) bool {
+	switch inc.Note {
+	case "removed", "update_left", "update_refused", "update_settled":
+		return inc.Type == "update"
+	}
+	return false
 }

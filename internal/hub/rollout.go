@@ -29,10 +29,11 @@ const (
 	rolloutKey = "update:agents"
 	// rolloutName prefixes the target version in the incident's name; a
 	// restarted hub reads the version back from it.
-	rolloutName     = "uptimeforge-agent "
-	rolloutSoak     = 10 * time.Minute
-	updateWait      = 10 * time.Minute
-	maxUpdateErrLen = 300
+	rolloutName      = "uptimeforge-agent "
+	rolloutSoak      = 10 * time.Minute
+	updateWait       = 10 * time.Minute
+	rolloutFlapLimit = time.Hour
+	maxUpdateErrLen  = 300
 
 	// Reasons on the incident's lines.
 	reasonUpdateMissing    = "update_missing"     // not back on the new version
@@ -94,12 +95,50 @@ type rollout struct {
 	failed     map[string]string // never sent this target again: why
 	left       map[string]bool   // moved to a dev build or a newer release
 	halted     bool
-	removed    bool // the stragglers went by being deleted
+	// settled says how each straggler of the open incident stopped being
+	// one (outcome*); the close says so.
+	settled map[string]string
 }
+
+// How a straggler stops being one.
+const (
+	outcomeBack    = "back"    // on the new version for good
+	outcomeRemoved = "removed" // deleted from the config
+	outcomeLeft    = "left"    // moved to a dev build or a newer release
+	outcomeRefused = "refused" // said it would not install the update
+)
 
 func newRollout(target string) rollout {
 	return rollout{init: true, target: target, told: map[string]bool{}, watching: map[string]*watch{},
-		stragglers: map[string]string{}, failed: map[string]string{}, left: map[string]bool{}}
+		stragglers: map[string]string{}, failed: map[string]string{}, left: map[string]bool{}, settled: map[string]string{}}
+}
+
+// settle notes how a straggler stopped being one; others are not noted.
+func (r *rollout) settle(id, how string) {
+	if _, ok := r.stragglers[id]; ok {
+		delete(r.stragglers, id)
+		r.settled[id] = how
+	}
+}
+
+// closeNote is the closed incident's note: none when every straggler came
+// back on the new version, else what became of them.
+func closeNote(settled map[string]string) string {
+	hows := map[string]bool{}
+	for _, how := range settled {
+		hows[how] = true
+	}
+	switch {
+	case len(hows) == 0, len(hows) == 1 && hows[outcomeBack]:
+		return ""
+	case len(hows) > 1:
+		return "update_settled"
+	case hows[outcomeRemoved]:
+		return "removed"
+	case hows[outcomeLeft]:
+		return "update_left"
+	}
+	return "update_refused"
 }
 
 // rolloutOn says whether the hub rolls anything out: not a dev build, and
@@ -170,6 +209,13 @@ func (h *Hub) rolloutStep(now time.Time) {
 	for id, w := range r.watching {
 		h.follow(id, w, now)
 	}
+	for id := range r.told { // failed and left agents were told too
+		if p := h.probes[id]; p == nil || p.cfg.Virtual() {
+			delete(r.told, id) // deleted: no longer part of the rollout
+			delete(r.failed, id)
+			delete(r.left, id)
+		}
+	}
 	h.rolloutIncident(now)
 	if r.halted || now.Before(h.started.Add(startupGrace)) {
 		return // halted, or agents are still reconnecting after the hub start
@@ -218,28 +264,29 @@ func (h *Hub) follow(id string, w *watch, now time.Time) {
 	switch {
 	case p == nil || p.cfg.Virtual(): // deleted: nothing to wait for
 		delete(r.watching, id)
-		if _, ok := r.stragglers[id]; ok {
-			delete(r.stragglers, id)
-			r.removed = true
-		}
+		r.settle(id, outcomeRemoved)
 		return
 	case r.onTarget(p):
 		if w.on.IsZero() {
 			w.on = now
 		}
 		w.wasOn, w.missing = true, time.Time{}
-		if _, ok := r.stragglers[id]; ok {
-			delete(r.stragglers, id)
-			r.removed = false
+		soaked := now.Sub(w.on) >= rolloutSoak
+		if !soaked && now.Sub(w.sent) >= rolloutFlapLimit {
+			// Back again, but never for a clean soak since the update: it
+			// keeps dying on the new version.
+			r.stragglers[id], r.halted = reasonUpdateMissing, true
+			return
 		}
-		if r.stage >= 3 && now.Sub(w.on) >= rolloutSoak {
+		r.settle(id, outcomeBack)
+		if r.stage >= 3 && soaked {
 			delete(r.watching, id) // proven
 		}
 		return
 	case p.online && !r.older(p.hello.Version):
 		// A dev build or a newer release: someone else took the agent over.
 		delete(r.watching, id)
-		delete(r.stragglers, id)
+		r.settle(id, outcomeLeft)
 		r.left[id] = true
 		return
 	}
@@ -251,7 +298,7 @@ func (h *Hub) follow(id string, w *watch, now time.Time) {
 	case p.online && w.wasOn:
 		// It ran the new version and is back on an older one: rolled back.
 		r.stragglers[id] = reasonUpdateRolledBack
-	case now.Sub(w.missing) < updateWait:
+	case now.Sub(w.missing) < updateWait && now.Sub(w.sent) < rolloutFlapLimit:
 		return
 	case p.online && w.reconnected:
 		// Back on its old version without ever reaching the new one.
@@ -315,11 +362,8 @@ func (h *Hub) sendUpdates(ids []string, now time.Time) []string {
 func (h *Hub) rolloutIncident(now time.Time) {
 	r := &h.roll
 	if len(r.stragglers) == 0 {
-		note := ""
-		if r.removed {
-			note = "removed"
-		}
-		h.closeRollout(note, "", now)
+		h.closeRollout(closeNote(r.settled), "", now)
+		clear(r.settled)
 		return
 	}
 	var lines []model.ProbeLine
@@ -412,7 +456,8 @@ func (h *Hub) ResumeRollout(by string) {
 			r.failed[id] = fmt.Sprintf("the update to %s was rolled back", r.target)
 		}
 	}
-	r.stragglers, r.halted, r.removed = map[string]string{}, false, false
+	r.stragglers, r.halted = map[string]string{}, false
+	clear(r.settled)
 	h.log.Info("agent update resumed", "version", r.target, "by", by)
 	h.closeRollout(noteRolloutResumed, cmp.Or(by, "admin"), h.now())
 	h.rolloutStep(h.now())
@@ -432,9 +477,9 @@ func (h *Hub) updateResult(probeID string, res proto.UpdateResult) {
 	if msg == "" {
 		msg = "update failed"
 	}
-	r.failed[probeID] = msg
+	r.failed[probeID], r.told[probeID] = msg, true // told or not (a restart while it installed): not again
 	delete(r.watching, probeID)
-	delete(r.stragglers, probeID)
+	r.settle(probeID, outcomeRefused)
 	h.log.Warn("agent refused the update", "probe", probeID, "version", r.target, "err", msg)
 	h.rolloutStep(h.now())
 }

@@ -391,3 +391,31 @@ func TestFormatAgentUpdate(t *testing.T) {
 		t.Errorf("removed:\n%s", msg)
 	}
 }
+
+// A rollout incident closed by something other than the agents coming back
+// says what happened, and is not a recovery.
+func TestFormatAgentUpdateClosedWithoutReturn(t *testing.T) {
+	now := time.Now()
+	for lang, wants := range map[string]map[string]string{
+		"ru": {"removed": "Агент удалён", "update_left": "перешёл на другую версию", "update_refused": "отказался ставить обновление",
+			"update_settled": "вернулся, удалён, перешёл на другую версию или отказался"},
+		"en": {"removed": "Agent deleted", "update_left": "moved to another version", "update_refused": "refused the update",
+			"update_settled": "came back, was deleted, moved to another version or refused"},
+	} {
+		f := &Formatter{Lang: lang, Loc: time.UTC}
+		for note, want := range wants {
+			inc := agentUpdateIncident(now)
+			inc.Resolved, inc.Note = now, note
+			for _, msg := range []string{f.Resolved(inc), f.RichResolved(inc), f.ResolvedReply(inc)} {
+				if strings.Contains(msg, "🟢") {
+					t.Errorf("%s %s reads as a recovery:\n%s", lang, note, msg)
+				}
+			}
+			for _, msg := range []string{f.Resolved(inc), f.RichResolved(inc)} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("%s %s lacks %q:\n%s", lang, note, want, msg)
+				}
+			}
+		}
+	}
+}

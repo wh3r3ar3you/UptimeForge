@@ -50,7 +50,11 @@ var texts = map[string]dict{
 		"update_stopped": "⏹ Раскатка прекращена: обновление агентов выключено или у хаба другая версия",
 		"update_closed":  "Раскатка прекращена", "update_removed": "🗑 Агент удалён",
 		"reply_update_stopped": "⏹ Раскатка прекращена: <b>%s</b>",
-		"affected":             "Затронуто проверок: %d — %s", "affected_more": "и ещё %d",
+		"update_done":          "Агентов больше не ждём", "reply_update_done": "☑️ Агентов больше не ждём: <b>%s</b>",
+		"update_left":    "↪️ Агент перешёл на другую версию (dev или новее)",
+		"update_refused": "✋ Агент отказался ставить обновление",
+		"update_settled": "☑️ Каждый отставший агент вернулся, удалён, перешёл на другую версию или отказался от обновления",
+		"affected":       "Затронуто проверок: %d — %s", "affected_more": "и ещё %d",
 		"report_title": "Неделя мониторинга", "report_uptime": "Аптайм проверок: <b>%s</b>", "report_worst": "Дольше всех лежали",
 		"report_nodes": "Ноды и серверы без связи", "report_bans": "Блокировки (ушли пользователи)",
 		"report_incidents": "Инцидентов: открыто <b>%d</b>, закрыто <b>%d</b>, вручную %d", "report_mttr": "в среднем до восстановления %s",
@@ -130,7 +134,11 @@ var texts = map[string]dict{
 		"update_stopped": "⏹ Rollout stopped: agent updates were switched off or the hub runs another version",
 		"update_closed":  "Rollout stopped", "update_removed": "🗑 Agent deleted",
 		"reply_update_stopped": "⏹ Rollout stopped: <b>%s</b>",
-		"affected":             "Checks affected: %d — %s", "affected_more": "and %d more",
+		"update_done":          "No longer waiting for the agents", "reply_update_done": "☑️ No longer waiting for the agents: <b>%s</b>",
+		"update_left":    "↪️ The agent moved to another version (dev or newer)",
+		"update_refused": "✋ The agent refused the update",
+		"update_settled": "☑️ Each straggler came back, was deleted, moved to another version or refused the update",
+		"affected":       "Checks affected: %d — %s", "affected_more": "and %d more",
 		"report_title": "Monitoring week", "report_uptime": "Checks uptime: <b>%s</b>", "report_worst": "Down the longest",
 		"report_nodes": "Nodes and servers lost", "report_bans": "Bans (users gone)",
 		"report_incidents": "Incidents: <b>%d</b> opened, <b>%d</b> closed, %d by hand", "report_mttr": "%s to recover on average",
@@ -512,6 +520,9 @@ func (f *Formatter) Resolved(inc *model.Incident) string {
 func (f *Formatter) ResolvedReply(inc *model.Incident) string {
 	if inc.Type == "update" && inc.Note == "update_stopped" {
 		return f.t("reply_update_stopped", esc(inc.Name))
+	}
+	if updateClosedWithoutReturn(inc) {
+		return f.t("reply_update_done", esc(inc.Name))
 	}
 	if inc.ResolvedBy != "" {
 		return f.t("reply_closed", esc(inc.Name), esc(inc.ResolvedBy))

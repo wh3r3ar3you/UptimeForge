@@ -4504,3 +4504,174 @@ func TestRolloutClosedByHandAlertsOnNextHalt(t *testing.T) {
 		t.Fatalf("a new halt after a manual close raised %d alerts in all, want 2", n)
 	}
 }
+
+// An agent that refuses a version it was never told in this hub run (the
+// hub restarted while it was installing) is not told it afterwards.
+func TestRolloutRefusalFromUntoldAgent(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.h.updateResult("a05", proto.UpdateResult{Version: rollTarget, Error: "checksums: bad signature"})
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02", "a03")
+	r.restart("a02", "a03")
+	r.advance(rolloutSoak)
+	r.tick()
+	want := slices.DeleteFunc(ids(4, 20), func(id string) bool { return id == "a05" })
+	r.expectSent(want...)
+}
+
+// A deleted agent leaves the status too.
+func TestRolloutFailedForgetsDeletedAgent(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.h.updateResult("a01", proto.UpdateResult{Version: rollTarget, Error: "no space left"})
+	if len(r.h.Rollout().Failed) != 1 {
+		t.Fatalf("status %+v", r.h.Rollout())
+	}
+	if err := r.h.Apply(rolloutCfg(t, 20, func(c *Config) { c.Probes = c.Probes[1:] })); err != nil {
+		t.Fatal(err)
+	}
+	r.tick()
+	if st := r.h.Rollout(); len(st.Failed) != 0 {
+		t.Fatalf("a deleted agent is still listed: %+v", st.Failed)
+	}
+}
+
+// stage2Halt is a rollout halted because a02 and a03, the 10% stage, are
+// both missing.
+func stage2Halt(t *testing.T) *rollRig {
+	t.Helper()
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02", "a03")
+	r.drop("a02")
+	r.drop("a03")
+	r.advance(updateWait)
+	r.tick()
+	if ev := r.rec.find(model.EventOpen, rolloutKey); ev == nil || len(ev.Incident.Lines) != 2 {
+		t.Fatalf("no halt for a02 and a03: %+v", ev)
+	}
+	return r
+}
+
+// The close says what became of the stragglers; only their return on the
+// new version is a recovery.
+func TestRolloutCloseSaysWhatHappened(t *testing.T) {
+	closed := func(r *rollRig) string {
+		t.Helper()
+		ev := r.rec.find(model.EventResolve, rolloutKey)
+		if ev == nil {
+			t.Fatal("the incident did not close")
+		}
+		return ev.Incident.Note
+	}
+	deleteProbe := func(r *rollRig, id string) {
+		cfg := rolloutCfg(t, 20, func(c *Config) {
+			c.Probes = slices.DeleteFunc(c.Probes, func(p ProbeConfig) bool { return p.ID == id })
+		})
+		if err := r.h.Apply(cfg); err != nil {
+			t.Fatal(err)
+		}
+		r.tick()
+	}
+
+	r := stage2Halt(t)
+	r.connect("a02", rollTarget, true)
+	r.connect("a03", rollTarget, true)
+	if n := closed(r); n != "" {
+		t.Fatalf("both back on the new version: note %q", n)
+	}
+
+	r = stage2Halt(t)
+	r.connect("a02", "dev", true)
+	r.connect("a03", "0.3.0", true)
+	if n := closed(r); n != "update_left" {
+		t.Fatalf("both moved to another version: note %q", n)
+	}
+
+	r = stage2Halt(t)
+	r.h.updateResult("a02", proto.UpdateResult{Version: rollTarget, Error: "x"})
+	r.h.updateResult("a03", proto.UpdateResult{Version: rollTarget, Error: "y"})
+	if n := closed(r); n != "update_refused" {
+		t.Fatalf("both refused: note %q", n)
+	}
+
+	r = stage2Halt(t)
+	deleteProbe(r, "a02")
+	if r.rec.find(model.EventResolve, rolloutKey) != nil {
+		t.Fatal("closed while a03 is still missing")
+	}
+	deleteProbe(r, "a03")
+	if n := closed(r); n != "removed" {
+		t.Fatalf("both deleted: note %q", n)
+	}
+
+	r = stage2Halt(t)
+	deleteProbe(r, "a02")
+	r.connect("a03", "dev", true)
+	if n := closed(r); n != "update_settled" {
+		t.Fatalf("one deleted, one moved on: note %q", n)
+	}
+
+	r = stage2Halt(t)
+	deleteProbe(r, "a02")
+	r.connect("a03", rollTarget, true)
+	if n := closed(r); n != "update_settled" {
+		t.Fatalf("one deleted, one back: note %q", n)
+	}
+}
+
+// A member that keeps coming back on the new version and dying holds its
+// stage; an hour after the update without a clean 10 minutes it halts the
+// rollout.
+func TestRolloutFlappingMemberHalts(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	for elapsed := time.Duration(0); elapsed < rolloutFlapLimit-5*time.Minute; elapsed += 5 * time.Minute {
+		r.restart("a01")
+		r.advance(4 * time.Minute)
+		r.drop("a01")
+		r.advance(time.Minute)
+		r.tick()
+		if st := r.h.Rollout(); st.Halted || st.Stage != 1 {
+			t.Fatalf("after %s: %+v", elapsed, st)
+		}
+	}
+	r.expectSent()
+	r.restart("a01")
+	r.advance(5 * time.Minute)
+	r.tick()
+	st := r.h.Rollout()
+	ev := r.rec.find(model.EventOpen, rolloutKey)
+	if !st.Halted || ev == nil || len(ev.Incident.Lines) != 1 || ev.Incident.Lines[0].Probe != "a01" || ev.Incident.Lines[0].Reason != "update_missing" {
+		t.Fatalf("a flapping canary an hour on: %+v, incident %+v", st, ev)
+	}
+	r.expectSent()
+	// Ten clean minutes on the new version and it counts as back.
+	r.advance(rolloutSoak)
+	r.tick()
+	if r.rec.find(model.EventResolve, rolloutKey) == nil {
+		t.Fatal("the canary ran 10 minutes on the new version, the incident is still open")
+	}
+}
