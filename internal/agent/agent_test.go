@@ -390,12 +390,13 @@ func (h *updateHub) downloads() []string {
 	return append([]string(nil), h.fetched...)
 }
 
-// signedRelease is checksums.txt, its signature and the agent binary for
-// this platform, signed with priv.
+// signedRelease is checksums.txt of release 0.9.0, its signature and the
+// agent binary for this platform, signed with priv.
 func signedRelease(priv ed25519.PrivateKey, bin []byte) map[string][]byte {
 	name := update.AssetName(runtime.GOOS, update.ReleaseArch())
 	sum := sha256.Sum256(bin)
-	sums := []byte(hex.EncodeToString(sum[:]) + "  " + name + "\n")
+	sums := []byte(hex.EncodeToString(sum[:]) + "  " + name + "\n" +
+		strings.Repeat("0", 64) + "  " + update.ArchiveName("0.9.0", runtime.GOOS, update.ReleaseArch()) + "\n")
 	return map[string][]byte{"checksums.txt": sums, "checksums.txt.sig": update.Sign(priv, sums), name: bin}
 }
 
@@ -457,18 +458,27 @@ func TestAgentHandlesUpdate(t *testing.T) {
 		builtin    string // the launcher's own version
 		want       string
 		noDownload bool
+		running    string // this agent's version, if not the test binary's
 	}{
-		"bad signature":    {signedRelease(stranger, bin), true, "0.1.0", "signature", false},
-		"files missing":    {map[string][]byte{}, true, "0.1.0", "404", false},
-		"without launcher": {signedRelease(priv, bin), false, "", "not running under the launcher", true},
+		"bad signature":    {signedRelease(stranger, bin), true, "0.1.0", "signature", false, ""},
+		"files missing":    {map[string][]byte{}, true, "0.1.0", "404", false, ""},
+		"without launcher": {signedRelease(priv, bin), false, "", "not running under the launcher", true, ""},
 		// The launcher would never select it: installing it means exit 75
 		// into the same binary, again and again.
-		"dev launcher":        {signedRelease(priv, bin), true, "dev", "development build cannot update", true},
-		"same as builtin":     {signedRelease(priv, bin), true, "0.9.0", "version not newer than the installed agent", true},
-		"older than builtin":  {signedRelease(priv, bin), true, "1.0.0", "version not newer than the installed agent", true},
-		"launcher of unknown": {signedRelease(priv, bin), true, "", "development build cannot update", true},
+		"dev launcher":        {signedRelease(priv, bin), true, "dev", "development build cannot update", true, ""},
+		"same as builtin":     {signedRelease(priv, bin), true, "0.9.0", "version not newer than the installed agent", true, ""},
+		"older than builtin":  {signedRelease(priv, bin), true, "1.0.0", "version not newer than the installed agent", true, ""},
+		"launcher of unknown": {signedRelease(priv, bin), true, "", "development build cannot update", true, ""},
+		// The launcher would run 0.9.0 over its builtin 0.1.0, but this agent
+		// already runs 1.0.0 (installed earlier): 0.9.0 is a downgrade.
+		"older than running": {signedRelease(priv, bin), true, "0.1.0", "version not newer than the running agent", true, "1.0.0"},
 	} {
 		t.Run(name, func(t *testing.T) {
+			if tc.running != "" {
+				saved := version.Version
+				version.Version = tc.running
+				defer func() { version.Version = saved }()
+			}
 			hub := newUpdateHub(t, tc.files, "0.9.0")
 			dir := t.TempDir()
 			ctx, cancel := context.WithCancel(context.Background())

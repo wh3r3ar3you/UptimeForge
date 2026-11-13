@@ -450,12 +450,16 @@ func (a *Agent) markConnected() {
 // startUpdate installs release v in the background. On success the agent
 // restarts into it (Run returns ErrRestart) and tells the hub nothing; on
 // failure it reports why and keeps running. Only one update runs at a time,
-// and the version already running is not installed again.
+// the version already running is not installed again, and nothing older
+// than it is installed at all (a downgrade, even a signed one).
 func (a *Agent) startUpdate(ctx context.Context, v string, client *http.Client) {
 	if v == version.Version {
 		return
 	}
 	switch {
+	case update.Compare(v, version.Version) <= 0:
+		a.updateFailed(ctx, v, errors.New("version not newer than the running agent"))
+		return
 	case !a.cfg.Launcher:
 		a.updateFailed(ctx, v, errors.New("not running under the launcher"))
 		return
@@ -497,17 +501,14 @@ func (a *Agent) updateFailed(ctx context.Context, v string, err error) {
 	}
 }
 
-// fetcher downloads release files from the hub's public /download/ (no
-// credentials), capped in size. Errors carry no URL: they go to the hub UI.
-func (a *Agent) fetcher(ctx context.Context, client *http.Client) func(string) ([]byte, error) {
+// fetcher opens release files on the hub's public /download/ (no
+// credentials); update.Install caps and streams them. Errors carry no URL:
+// they go to the hub UI.
+func (a *Agent) fetcher(ctx context.Context, client *http.Client) func(string) (io.ReadCloser, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return func(name string) ([]byte, error) {
-		limit := int64(256 << 20)
-		if strings.HasPrefix(name, "checksums.txt") {
-			limit = 1 << 20
-		}
+	return func(name string) (io.ReadCloser, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, DownloadURL(a.cfg.HubURL, name), nil)
 		if err != nil {
 			return nil, plainURLErr(err)
@@ -516,19 +517,23 @@ func (a *Agent) fetcher(ctx context.Context, client *http.Client) func(string) (
 		if err != nil {
 			return nil, plainURLErr(err)
 		}
-		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
 			return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 		}
-		b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-		if err != nil {
-			return nil, plainURLErr(err)
-		}
-		if int64(len(b)) > limit {
-			return nil, fmt.Errorf("larger than %d bytes", limit)
-		}
-		return b, nil
+		return plainBody{resp.Body}, nil
 	}
+}
+
+// plainBody strips the URL from read errors of a download.
+type plainBody struct{ io.ReadCloser }
+
+func (b plainBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil && err != io.EOF {
+		err = plainURLErr(err)
+	}
+	return n, err
 }
 
 // DownloadURL is a file under the hub's /download/, from the same hub

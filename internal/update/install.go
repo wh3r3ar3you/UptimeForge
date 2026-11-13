@@ -9,9 +9,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -137,28 +139,43 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 	return os.Rename(tmp, path)
 }
 
-// Install downloads release version for goos/arch with fetch (a file name
+const (
+	// MaxBinarySize caps a downloaded agent binary. It streams to disk, so
+	// the cap is about flash and bandwidth, not memory (checker containers
+	// have 256 MB).
+	MaxBinarySize = 128 << 20
+	// maxSumsSize caps checksums.txt and its signature, read into memory.
+	maxSumsSize = 1 << 20
+)
+
+// Install downloads release version for goos/arch with open (a file name
 // under the hub's /download/), checks it against checksums.txt signed by
 // one of keys, installs it under bin/<version>/ and makes it current, the
-// old current becoming previous. On any error current and previous are as
-// they were.
-func Install(ctx context.Context, stateDir, version, goos, arch string, fetch func(name string) ([]byte, error), keys []ed25519.PublicKey) error {
+// old current becoming previous. The signed checksums.txt must list this
+// version's release archive for the platform (ArchiveName): an old signed
+// checksums.txt cannot pass for a newer version. The binary streams to a
+// temp file in bin/ while it is hashed. On any error current and previous
+// are as they were, and nothing of the download stays on disk.
+func Install(ctx context.Context, stateDir, version, goos, arch string, open func(name string) (io.ReadCloser, error), keys []ed25519.PublicKey) error {
 	if !IsRelease(version) {
 		return fmt.Errorf("%q is not a release version", version)
 	}
 	if len(keys) == 0 {
 		return ErrNoKeys
 	}
-	sums, err := fetch("checksums.txt")
+	sums, err := readSmall(open, "checksums.txt")
 	if err != nil {
-		return fmt.Errorf("download checksums.txt: %w", err)
+		return err
 	}
-	sig, err := fetch("checksums.txt.sig")
+	sig, err := readSmall(open, "checksums.txt.sig")
 	if err != nil {
-		return fmt.Errorf("download checksums.txt.sig: %w", err)
+		return err
 	}
 	if err := Verify(keys, sums, sig); err != nil {
 		return fmt.Errorf("checksums.txt: %w", err)
+	}
+	if archive := ArchiveName(version, goos, arch); !lists(sums, archive) {
+		return fmt.Errorf("checksums.txt is not of release %s: it does not list %s", version, archive)
 	}
 	name := AssetName(goos, arch)
 	want, err := checksumOf(sums, name)
@@ -168,19 +185,17 @@ func Install(ctx context.Context, stateDir, version, goos, arch string, fetch fu
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	bin, err := fetch(name)
+	tmp, err := download(stateDir, open, name, want)
 	if err != nil {
-		return fmt.Errorf("download %s: %w", name, err)
+		return err
 	}
-	if got := sha256.Sum256(bin); !bytes.Equal(got[:], want) {
-		return fmt.Errorf("%s: sha256 does not match checksums.txt", name)
-	}
+	defer os.Remove(tmp) // no-op after the rename
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
 	path := binPath(stateDir, version)
-	if err := writeAtomic(path, bin, 0o755); err != nil {
+	if err := placeBinary(tmp, path); err != nil {
 		os.Remove(filepath.Dir(path)) // only if empty
 		return fmt.Errorf("install %s: %w", version, err)
 	}
@@ -220,6 +235,76 @@ func Install(ctx context.Context, stateDir, version, goos, arch string, fetch fu
 	return nil
 }
 
+// readSmall reads a checksums file, capped at maxSumsSize.
+func readSmall(open func(string) (io.ReadCloser, error), name string) ([]byte, error) {
+	rc, err := open(name)
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", name, err)
+	}
+	defer rc.Close()
+	b, err := io.ReadAll(io.LimitReader(rc, maxSumsSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", name, err)
+	}
+	if len(b) > maxSumsSize {
+		return nil, fmt.Errorf("download %s: larger than %d bytes", name, maxSumsSize)
+	}
+	return b, nil
+}
+
+// download streams name into a temp file in bin/ while hashing it, up to
+// MaxBinarySize, and returns the file once its sha256 is want. On any error
+// the temp file is gone.
+func download(stateDir string, open func(string) (io.ReadCloser, error), name string, want []byte) (tmp string, err error) {
+	dir := filepath.Join(stateDir, "bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	rc, err := open(name)
+	if err != nil {
+		return "", fmt.Errorf("download %s: %w", name, err)
+	}
+	defer rc.Close()
+	f, err := os.CreateTemp(dir, ".download-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err != nil {
+			f.Close()
+			os.Remove(f.Name())
+		}
+	}()
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(rc, MaxBinarySize+1))
+	switch {
+	case err != nil:
+		return "", fmt.Errorf("download %s: %w", name, err)
+	case n > MaxBinarySize:
+		return "", fmt.Errorf("download %s: larger than %d bytes", name, MaxBinarySize)
+	case !bytes.Equal(h.Sum(nil), want):
+		return "", fmt.Errorf("%s: sha256 does not match checksums.txt", name)
+	}
+	if err = f.Sync(); err != nil {
+		return "", err
+	}
+	if err = f.Close(); err != nil {
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+// placeBinary makes the verified temp file the executable at path.
+func placeBinary(tmp, path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func isFile(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && st.Mode().IsRegular()
@@ -237,23 +322,33 @@ func writeVersion(stateDir, name, v string) error {
 	return writeAtomic(path, []byte(v+"\n"), 0o644)
 }
 
-// prune removes installed versions other than keep: routers have little
-// flash. Errors are ignored (Windows cannot remove a running binary; the
-// next install tries again).
+// prune removes installed versions other than keep (routers have little
+// flash), leftovers of failed downloads, and the connected markers of
+// versions no longer in bin/. Errors are ignored (Windows cannot remove a
+// running binary; the next install tries again).
 func prune(stateDir string, keep ...string) {
 	entries, err := os.ReadDir(filepath.Join(stateDir, "bin"))
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		kept := false
-		for _, k := range keep {
-			kept = kept || (k != "" && e.Name() == k)
-		}
-		if !kept {
+		if !slices.Contains(keep, e.Name()) {
 			os.RemoveAll(filepath.Join(stateDir, "bin", e.Name()))
 		}
 	}
+	markers, _ := filepath.Glob(filepath.Join(stateDir, ConnectedMarker("*")))
+	for _, m := range markers {
+		v := strings.TrimPrefix(filepath.Base(m), ConnectedMarker(""))
+		if _, err := os.Stat(filepath.Join(stateDir, "bin", v)); err != nil {
+			os.Remove(m)
+		}
+	}
+}
+
+// lists says whether a sha256sum listing has a line for name.
+func lists(sums []byte, name string) bool {
+	_, err := checksumOf(sums, name)
+	return err == nil
 }
 
 // checksumOf finds name in a sha256sum listing ("<hex>  <name>", or

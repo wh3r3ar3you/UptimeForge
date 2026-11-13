@@ -115,3 +115,16 @@ func AssetName(goos, arch string) string {
 	}
 	return name
 }
+
+// ArchiveName is the packaged release archive of the agent for a platform,
+// as packaged-agent in .goreleaser.yaml names it ("{{ .Binary }}_{{ .Version
+// }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}", zip on
+// windows); arch is the release arch (armv7). It carries the version, so a
+// checksums.txt that lists it belongs to that release.
+func ArchiveName(version, goos, arch string) string {
+	ext := ".tar.gz"
+	if goos == "windows" {
+		ext = ".zip"
+	}
+	return "uptimeforge-agent_" + version + "_" + goos + "_" + arch + ext
+}
