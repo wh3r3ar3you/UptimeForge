@@ -6,7 +6,7 @@ import {
   IconDots, IconFlask2, IconLock, IconPencil, IconPlus, IconTicket, IconTrash, IconWorldSearch,
 } from '@tabler/icons-react';
 import { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
 import { api, enc, isChecker, queryClient, useInvites, useIsAdmin, useProbes, type Invite, type ProbeConfig, type ProbeRow } from '../api';
 import { Section } from '../components/Cards';
 import { InviteModal } from '../components/InviteModal';
@@ -33,7 +33,7 @@ const L = {
     invites: 'Приглашения', inv_name: 'Название', inv_created: 'Создано', inv_expires: 'Срок', inv_state: 'Состояние',
     inv_active: 'ждёт', inv_used: 'использовано', inv_expired: 'истекло', revoke: 'Отозвать', remove: 'Убрать',
     revoke_body: 'Отозвать приглашение «{0}»? Команда с этим кодом перестанет работать.', revoked: 'Приглашение отозвано',
-    no_invites: 'Активных приглашений нет', unnamed: 'без названия', w_check: 'проверка|проверки|проверок', checks_tip: 'Назначено {0} {1}',
+    more: 'Ещё действия', no_invites: 'Активных приглашений нет', unnamed: 'без названия', w_check: 'проверка|проверки|проверок', checks_tip: 'Назначено {0} {1}',
   },
   en: {
     title: 'Checker agents', subtitle: 'Vantage points on other people’s machines: they test your nodes the way subscribers of different operators see them',
@@ -50,7 +50,7 @@ const L = {
     invites: 'Invites', inv_name: 'Name', inv_created: 'Created', inv_expires: 'Expires', inv_state: 'State',
     inv_active: 'waiting', inv_used: 'used', inv_expired: 'expired', revoke: 'Revoke', remove: 'Remove',
     revoke_body: 'Revoke the invite “{0}”? The command with its code stops working.', revoked: 'Invite revoked',
-    no_invites: 'No active invites', unnamed: 'unnamed', w_check: 'check|checks', checks_tip: '{0} {1} assigned',
+    more: 'More actions', no_invites: 'No active invites', unnamed: 'unnamed', w_check: 'check|checks', checks_tip: '{0} {1} assigned',
   },
 };
 
@@ -164,7 +164,9 @@ export default function Checkers() {
   const isAdmin = useIsAdmin();
   const probes = useProbes();
   const invites = useInvites(isAdmin);
-  const [adding, setAdding] = useState(false);
+  const [params, setParams] = useSearchParams();
+  // ?invite=1 (from a checker that lost its token) opens «Добавить точку».
+  const [adding, setAdding] = useState(() => params.get('invite') === '1');
   const [renaming, setRenaming] = useState<ProbeRow | null>(null);
 
   const list = useMemo(() => (probes.data?.probes ?? []).filter(isChecker)
@@ -264,7 +266,7 @@ export default function Checkers() {
                       {isAdmin && (
                         <Table.Td onClick={(e) => e.stopPropagation()}>
                           <Menu position="bottom-end">
-                            <Menu.Target><ActionIcon variant="subtle" color="gray" aria-label={t('title')}><IconDots size={16} /></ActionIcon></Menu.Target>
+                            <Menu.Target><ActionIcon variant="subtle" color="gray" aria-label={t('more')}><IconDots size={16} /></ActionIcon></Menu.Target>
                             <Menu.Dropdown>
                               <Menu.Item leftSection={<IconFlask2 size={15} />} onClick={() => nav(`/tools?probe=${enc(p.id)}`)}>{t('check_here')}</Menu.Item>
                               {!p.managed && (
@@ -296,7 +298,7 @@ export default function Checkers() {
       )}
 
       {renaming && <RenameModal probe={renaming} onClose={() => setRenaming(null)} />}
-      {isAdmin && <InviteModal opened={adding} onClose={() => setAdding(false)} hubURL={probes.data?.hub_url ?? ''} />}
+      {isAdmin && <InviteModal opened={adding} onClose={() => { setAdding(false); if (params.has('invite')) setParams({}, { replace: true }); }} hubURL={probes.data?.hub_url ?? ''} />}
     </Stack>
   );
 }

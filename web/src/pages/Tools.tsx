@@ -30,8 +30,9 @@ const L = {
     running_sub: 'Подписка проверяется по 8 конфигов параллельно — это может занять пару минут',
     result: 'Результат', latency: 'задержка', failed_after: 'ошибка через', speed: 'скорость', mbps: 'Мбит/с', exit: 'Выход в интернет', phases: 'Фазы',
     v_ok: 'Работает со всех проб · {0} из {0}', v_down: 'Не работает ни с одной пробы', v_blocked: 'Блок в {0}',
-    v_partial: 'Частично · не работает с {0} из {1}', v_unknown: 'Ни одна проба не ответила',
+    v_partial: 'Частично · не работает с {0} из {1}', v_unknown: 'Вердикта нет: ни одна проба не смогла проверить',
     excluded: 'Не учтены в вердикте: {0} — офлайн или без интернета', not_counted: 'не учтена: у пробы нет интернета',
+    excluded_unavail: 'Не учтены в вердикте — проба не может выполнить эту проверку: {0}', not_counted_unavail: 'не учтена: проба не может выполнить эту проверку',
     configs: '{0} {1}', works: 'работают', fails: 'не работают', blocked: 'блок', partial: 'частично',
     legend_up: 'работает', legend_down: 'не работает', legend_none: 'нет ответа', config: 'Конфиг',
     phase_connect: 'TCP', phase_tls: 'TLS', phase_ttfb: 'Первый байт', phase_rtt: 'RTT', phase_download: 'Загрузка',
@@ -48,8 +49,9 @@ const L = {
     running_sub: 'Configs are checked 8 at a time — this can take a couple of minutes',
     result: 'Result', latency: 'latency', failed_after: 'failed after', speed: 'throughput', mbps: 'Mbit/s', exit: 'Exits to the internet', phases: 'Phases',
     v_ok: 'Works from every probe · {0} of {0}', v_down: 'Fails from every probe', v_blocked: 'Blocked in {0}',
-    v_partial: 'Partial · fails from {0} of {1}', v_unknown: 'No probe answered',
+    v_partial: 'Partial · fails from {0} of {1}', v_unknown: 'No verdict: no probe could check it',
     excluded: 'Left out of the verdict: {0} — offline or without internet', not_counted: 'not counted: the probe has no internet',
+    excluded_unavail: 'Left out of the verdict — the probe cannot run this check: {0}', not_counted_unavail: 'not counted: the probe cannot run this check',
     configs: '{0} {1}', works: 'up', fails: 'down', blocked: 'blocked', partial: 'partial',
     legend_up: 'up', legend_down: 'down', legend_none: 'no answer', config: 'Config',
     phase_connect: 'TCP', phase_tls: 'TLS', phase_ttfb: 'First byte', phase_rtt: 'RTT', phase_download: 'Download',
@@ -60,10 +62,17 @@ const L = {
 type Mode = 'auto' | 'subscription';
 const PHASES = ['connect', 'tls', 'ttfb', 'rtt', 'download'] as const;
 
-/** Lines that count for the verdict: probes that answered and have internet, as in the hub's consensus. */
+/**
+ * unavailable: the probe cannot run this check at all (an untrusted checker
+ * agent and a check with secrets, no Chromium, no ICMP). It says nothing
+ * about the target, so it is no vote either way.
+ */
+const unavailable = (o?: RunOutcome) => o?.result?.reason === 'unavailable';
+
+/** Lines that count for the verdict: probes that answered, have internet and could run the check, as in the hub's consensus. */
 function verdictLines(outcomes: RunOutcome[], noNet: Set<string>) {
   return outcomes
-    .filter((o) => o.result && !noNet.has(o.probe))
+    .filter((o) => o.result && !noNet.has(o.probe) && !unavailable(o))
     .map((o) => ({ ok: o.result!.status === 'up', region: o.region, reason: o.result!.reason, bytes: o.result!.bytes }));
 }
 
@@ -145,7 +154,8 @@ function OutcomeCard({ o, noNet }: { o: RunOutcome; noNet: boolean }) {
   const speed = mbps(r?.bps);
   const phases = PHASES.filter((p) => (r?.phases?.[p] ?? 0) > 0);
   const info = Object.entries(r?.info ?? {}).filter(([k]) => k !== 'egress_ip' && k !== 'egress_loc');
-  const kind = !r ? (o.error === 'offline' ? 'probe_offline' : 'unknown') : up ? 'ok' : 'down';
+  const kind = !r ? (o.error === 'offline' ? 'probe_offline' : 'unknown') : unavailable(o) ? 'unknown' : up ? 'ok' : 'down';
+  const tone = unavailable(o) ? status.unknown : status.down;
   return (
     <Card padding="md" className="uf-card" style={{ opacity: r ? 1 : 0.75 }}>
       <Stack gap="sm">
@@ -194,8 +204,8 @@ function OutcomeCard({ o, noNet }: { o: RunOutcome; noNet: boolean }) {
           <Box
             p="xs"
             style={{
-              borderRadius: 8, background: `color-mix(in srgb, ${status.down} 8%, transparent)`,
-              border: `1px solid color-mix(in srgb, ${status.down} 25%, transparent)`,
+              borderRadius: 8, background: `color-mix(in srgb, ${tone} 8%, transparent)`,
+              border: `1px solid color-mix(in srgb, ${tone} 25%, transparent)`,
             }}
           >
             <Text size="sm" fw={600}>{r ? reason(r.reason, r.error, r.bytes) : reason(o.error, o.error)}</Text>
@@ -203,6 +213,7 @@ function OutcomeCard({ o, noNet }: { o: RunOutcome; noNet: boolean }) {
           </Box>
         )}
         {noNet && r && <Text size="xs" c="dimmed">{t('not_counted')}</Text>}
+        {!noNet && unavailable(o) && <Text size="xs" c="dimmed">{t('not_counted_unavail')}</Text>}
       </Stack>
     </Card>
   );
@@ -214,7 +225,11 @@ function SingleResult({ row, noNet }: { row: RunRow; noNet: Set<string> }) {
   const verdictText = useVerdictText();
   const lines = verdictLines(row.outcomes ?? [], noNet);
   const v = classify(lines);
-  const excluded = (row.outcomes?.length ?? 0) - lines.length;
+  const reason = useReason();
+  const outcomes = row.outcomes ?? [];
+  const excluded = outcomes.filter((o) => !o.result || noNet.has(o.probe)).length;
+  const cannot = outcomes.filter((o) => o.result && !noNet.has(o.probe) && unavailable(o))
+    .map((o) => `${o.name} (${[reason(o.result!.reason, o.result!.error), o.result!.error].filter(Boolean).join(': ')})`);
   const explain = v.kind === 'ok' || v.kind === 'unknown' ? '' : why(v.kind, lines, { region: v.region });
   return (
     <Stack gap="md">
@@ -231,6 +246,7 @@ function SingleResult({ row, noNet }: { row: RunRow; noNet: Set<string> }) {
           </Group>
           {explain && <Text size="sm" c="dimmed">{explain}</Text>}
           {excluded > 0 && <Text size="xs" c="dimmed">{t('excluded', excluded)}</Text>}
+          {cannot.length > 0 && <Text size="xs" c="dimmed">{t('excluded_unavail', cannot.join('; '))}</Text>}
           {row.error && <Alert color="red" variant="light" icon={<IconAlertCircle size={16} />}>{row.error}</Alert>}
         </Stack>
       </Card>
@@ -242,13 +258,13 @@ function SingleResult({ row, noNet }: { row: RunRow; noNet: Set<string> }) {
 }
 
 function cellStyle(o?: RunOutcome) {
-  if (!o?.result) return { background: 'var(--uf-track)', color: 'var(--mantine-color-dimmed)' };
+  if (!o?.result || unavailable(o)) return { background: 'var(--uf-track)', color: 'var(--mantine-color-dimmed)' };
   if (o.result.status === 'down') return { background: status.down, color: '#fff' };
   return { background: status.ok, color: '#fff' };
 }
 
 function cellText(o?: RunOutcome) {
-  if (!o?.result) return '–';
+  if (!o?.result || unavailable(o)) return '–';
   if (o.result.status === 'down') return '✕';
   const l = o.result.latency_ms;
   return l >= 1000 ? `${(l / 1000).toFixed(1)}s` : `${Math.round(l)}`;

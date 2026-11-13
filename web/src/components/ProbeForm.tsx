@@ -141,6 +141,7 @@ export function probeBody(next: ProbeConfig, shown: Record<string, string>): Pro
   if (body.via || body.local) delete body.role;
   if (body.role !== 'checker') {
     delete body.trusted;
+    delete body.labels_locked;
     return body;
   }
   const locked = new Set(next.labels_locked ?? []);

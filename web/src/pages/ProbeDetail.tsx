@@ -3,7 +3,7 @@ import {
 } from '@mantine/core';
 import { modals } from '@mantine/modals';
 import {
-  IconActivity, IconArrowsDownUp, IconCpu, IconDatabase, IconDots, IconGauge, IconKey, IconPencil, IconPlugConnected, IconStack2, IconTerminal2, IconTrash,
+  IconActivity, IconArrowsDownUp, IconCpu, IconDatabase, IconDots, IconGauge, IconKey, IconPencil, IconPlugConnected, IconStack2, IconTerminal2, IconTicket, IconTrash,
 } from '@tabler/icons-react';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
@@ -36,6 +36,8 @@ const L = {
     checkers: 'Агенты проверок', m_checker: 'агент проверок', trusted: 'доверенный', untrusted: 'недоверенный',
     no_metrics_checker: 'Агент проверок не присылает метрики хоста: это чужая машина, её нагрузка нас не касается.',
     confirm_checker: 'Удалить агента проверок «{0}»? Его токен перестанет работать; чтобы вернуть точку, нужно новое приглашение.',
+    checker_away: 'Точка не на связи с тех пор, как запущен хаб. Обычно она возвращается сама. Если машину переустановили или токен потерян, подключите её заново новым приглашением.',
+    new_invite: 'Новое приглашение',
   },
   en: {
     probes: 'All systems', edit: 'Edit', rotate: 'Rotate token', delete: 'Delete', online: 'online', offline: 'offline',
@@ -53,6 +55,8 @@ const L = {
     checkers: 'Checker agents', m_checker: 'checker agent', trusted: 'trusted', untrusted: 'untrusted',
     no_metrics_checker: 'A checker agent sends no host metrics: it is someone else’s machine and its load is none of our business.',
     confirm_checker: 'Delete checker agent “{0}”? Its token stops working; bringing the point back takes a new invite.',
+    checker_away: 'The point has not connected since the hub started. It usually comes back by itself. If the machine was reinstalled or the token is lost, connect it again with a new invite.',
+    new_invite: 'New invite',
   },
 };
 
@@ -177,7 +181,8 @@ export default function ProbeDetail() {
               <Menu position="bottom-end">
                 <Menu.Target><Button variant="default" px="xs" aria-label={t('more')}><IconDots size={18} /></Button></Menu.Target>
                 <Menu.Dropdown>
-                  {p.mode === 'agent' && <Menu.Item leftSection={<IconKey size={16} />} onClick={rotate}>{t('rotate')}</Menu.Item>}
+                  {/* A checker's token lives on a volunteer's machine: a new one would cut it off. It rejoins by invite. */}
+                  {p.mode === 'agent' && !checker && <Menu.Item leftSection={<IconKey size={16} />} onClick={rotate}>{t('rotate')}</Menu.Item>}
                   <Menu.Item color="red" leftSection={<IconTrash size={16} />} onClick={remove}>{t('delete')}</Menu.Item>
                 </Menu.Dropdown>
               </Menu>
@@ -186,7 +191,17 @@ export default function ProbeDetail() {
         />
       </Box>
 
-      {p.mode === 'agent' && !p.version && (
+      {checker && !p.online && !p.version && (
+        <Alert color="gray" icon={<IconPlugConnected size={16} />}>
+          <Stack gap="xs" align="flex-start">
+            <Text size="sm">{t('checker_away')}</Text>
+            {isAdmin && (
+              <Button size="xs" variant="white" color="dark" leftSection={<IconTicket size={14} />} component={Link} to="/checkers?invite=1">{t('new_invite')}</Button>
+            )}
+          </Stack>
+        </Alert>
+      )}
+      {p.mode === 'agent' && !checker && !p.version && (
         <Alert color="yellow" icon={<IconPlugConnected size={16} />}>
           <Stack gap="xs" align="flex-start">
             <Text size="sm">{isAdmin && !p.managed ? t('never') : t('never_viewer')}</Text>
