@@ -11,7 +11,7 @@ import {
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 import {
-  api, enc, queryClient, useMeta, useRemnawave, useRemnawaveUsers, type Incident, type Install, type ProbeRow, type RemnawaveNode,
+  api, enc, isChecker, queryClient, useMeta, useRemnawave, useRemnawaveUsers, type Incident, type Install, type ProbeRow, type RemnawaveNode,
 } from '../api';
 import { bitrate, bytes, compact, days, duration, flag, num } from '../format';
 import { useCommon, useLang, useT } from '../i18n';
@@ -305,7 +305,9 @@ function ViewMenu({ prefs, setPrefs, counts, t, sort, setSort }: {
  * server at a comfortable height, the columns the user picked, widths dragged
  * by hand, all of it saved to the user's profile.
  */
-export function SystemsTable({ probes, hubURL, incidents }: { probes: ProbeRow[]; hubURL: string; incidents: Incident[] }) {
+export function SystemsTable({ probes: all, hubURL, incidents }: { probes: ProbeRow[]; hubURL: string; incidents: Incident[] }) {
+  // Checker agents are other people's machines: they have their own tab.
+  const probes = useMemo(() => all.filter((p) => !isChecker(p)), [all]);
   const t = useT(L);
   const c = useCommon();
   const { lang } = useLang();
@@ -585,7 +587,7 @@ export function SystemsTable({ probes, hubURL, incidents }: { probes: ProbeRow[]
       </Box>
 
       {adding && <ProbeForm opened={adding} onClose={() => setAdding(false)} hubURL={hubURL} />}
-      {editing && <ProbeForm opened={!!editing} onClose={() => setEditing(null)} initial={editing.config} hubURL={hubURL} />}
+      {editing && <ProbeForm opened={!!editing} onClose={() => setEditing(null)} initial={editing.config} network={editing.network} hubURL={hubURL} />}
       <TokenModal install={install} hubURL={hubURL} title={t('new_token')} onClose={() => setInstall(null)} />
     </Box>
   );

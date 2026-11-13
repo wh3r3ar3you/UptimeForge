@@ -1,7 +1,7 @@
 import { Alert, Autocomplete, Button, Group, Modal, NumberInput, SegmentedControl, Select, Stack, Switch, Tabs, Text, TextInput, Textarea } from '@mantine/core';
 import { IconAlertCircle, IconAlertTriangle, IconBrandDocker, IconBinary, IconTerminal2 } from '@tabler/icons-react';
 import { useEffect, useRef, useState } from 'react';
-import { api, ApiError, queryClient, type Install, type ProbeConfig } from '../api';
+import { api, ApiError, queryClient, type Install, type NetworkView, type ProbeConfig } from '../api';
 import { countryMatches, countryOptions } from '../format';
 import { useCommon, useLang, useT } from '../i18n';
 import { CopyBlock, notifyOk } from './Misc';
@@ -25,6 +25,10 @@ const L = {
     docker_hint: 'Сеть хоста обязательна — иначе проба смотрит на мир из сети Docker.', binary_hint: 'Бинарники для всех платформ: {0}/download/…',
     saved_it: 'Я сохранил', created: 'Проба создана', saved: 'Сохранено',
     geo_busy: 'Определяю страну по адресу прокси…', geo_found: 'Определено по {0} · {1}', geo_unknown: 'Страну {0} определить не удалось', geo_err: 'Страна не определилась: {0}',
+    role: 'Чья это машина', r_server: 'Наша инфраструктура', r_checker: 'Агент проверок',
+    r_checker_hint: 'Чужая машина (доброволец): получает только проверки, выбранные явно, метрики хоста не шлёт, её офлайн не тревога.',
+    trusted: 'Доверенный', trusted_hint: 'Получит проверки с секретами: VPN-ссылки, подписки, пароли. Включайте только для машин, владельцу которых доверяете.',
+    asn: 'ASN', from_net: 'Определено по сети агента. Измените — и значение закрепится; очистите — снова будет браться из сети.', locked: 'Задано вручную. Очистите поле, чтобы снова брать из сети.',
   },
   en: {
     create: 'New server', edit: 'Server settings', mode: 'How the probe connects',
@@ -44,6 +48,10 @@ const L = {
     docker_hint: 'Host networking is required — otherwise the probe sees the world from Docker’s network.', binary_hint: 'Binaries for every platform: {0}/download/…',
     saved_it: 'I saved it', created: 'Probe created', saved: 'Saved',
     geo_busy: 'Finding the country of the proxy…', geo_found: 'Found from {0} · {1}', geo_unknown: 'No country known for {0}', geo_err: 'Country not found: {0}',
+    role: 'Whose machine', r_server: 'Our infrastructure', r_checker: 'Checker agent',
+    r_checker_hint: 'Someone else’s machine (a volunteer): it runs only the checks aimed at it, sends no host metrics, and going offline is not an alert.',
+    trusted: 'Trusted', trusted_hint: 'Gets checks with secrets: VPN links, subscriptions, passwords. Only for machines whose owner you trust.',
+    asn: 'ASN', from_net: 'Found from the agent’s network. Change it and the value sticks; clear it and it follows the network again.', locked: 'Set by hand. Clear the field to follow the network again.',
   },
 };
 
@@ -54,7 +62,7 @@ function slugify(s: string) {
 }
 
 // A hub on a private address can't be reached by agents in other networks.
-function privateHub(url: string) {
+export function privateHub(url: string) {
   try {
     return /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?$)|\.local$/.test(new URL(url).hostname);
   } catch {
@@ -113,12 +121,67 @@ export function TokenModal({ install, hubURL, title, onClose }: { install: Insta
   );
 }
 
-export function ProbeForm({ initial, opened, onClose, hubURL }: { initial?: ProbeConfig; opened: boolean; onClose: () => void; hubURL: string }) {
+/** The checker labels the hub sets from the agent's network, unless set by hand (labels_locked). */
+export const NETWORK_LABELS = ['country', 'asn', 'isp'] as const;
+
+/** networkLabels are the values the hub would give a checker from its network. */
+export function networkLabels(n?: NetworkView): Record<string, string> {
+  return { country: n?.country?.toLowerCase() ?? '', asn: n?.asn ?? '', isp: n?.isp ?? '' };
+}
+
+/**
+ * probeBody is a probe config the hub accepts: trusted only on a checker, a
+ * role only on an agent. For a checker, a network label the user changed
+ * from what the form showed is locked (the lookup leaves it alone), a cleared
+ * one is unlocked and follows the network again, and an untouched one that
+ * is not locked is left to the network.
+ */
+export function probeBody(next: ProbeConfig, shown: Record<string, string>): ProbeConfig {
+  const body: ProbeConfig = { ...next, labels: Object.fromEntries(Object.entries(next.labels ?? {}).filter(([k, v]) => v && k !== 'id' && k !== 'role')) };
+  if (body.via || body.local) delete body.role;
+  if (body.role !== 'checker') {
+    delete body.trusted;
+    return body;
+  }
+  const locked = new Set(next.labels_locked ?? []);
+  for (const k of NETWORK_LABELS) {
+    const v = body.labels![k] ?? '';
+    if (!v) locked.delete(k);
+    else if (v !== (shown[k] ?? '')) locked.add(k);
+    if (!locked.has(k)) delete body.labels![k];
+  }
+  body.labels_locked = [...locked];
+  return body;
+}
+
+export function ProbeForm({ initial, network, opened, onClose, hubURL }: {
+  initial?: ProbeConfig; opened: boolean; onClose: () => void; hubURL: string;
+  /** Where the agent connects from: a checker's country, ASN and operator default to it. */
+  network?: NetworkView;
+}) {
   const t = useT(L);
   const c = useCommon();
   const editing = !!initial;
   const { lang } = useLang();
-  const [p, setP] = useState<ProbeConfig>(() => (initial ? structuredClone(initial) : { id: '', name: '', labels: {} }));
+  // A checker shows its network labels where none was set by hand: the stored config does not keep them.
+  // On a probe that is not a checker yet, every label was set by hand: shown stays empty, so they get locked.
+  const [shown] = useState<Record<string, string>>(() => {
+    if (initial?.role !== 'checker') return {};
+    const net = networkLabels(network);
+    return Object.fromEntries(NETWORK_LABELS.map((k) => [k, initial?.labels_locked?.includes(k) ? initial.labels?.[k] ?? '' : net[k] || initial?.labels?.[k] || '']));
+  });
+  const [p, setP] = useState<ProbeConfig>(() => {
+    if (!initial) return { id: '', name: '', labels: {} };
+    const x = structuredClone(initial);
+    if (x.role === 'checker') x.labels = { ...x.labels, ...Object.fromEntries(Object.entries(shown).filter(([, v]) => v)) };
+    return x;
+  });
+  const checker = p.role === 'checker';
+  const netHint = (k: string) => {
+    const v = p.labels?.[k] ?? '';
+    if (!checker || !v) return undefined;
+    return p.labels_locked?.includes(k) || v !== shown[k] ? t('locked') : t('from_net');
+  };
   const [mode, setMode] = useState<'agent' | 'via' | 'local'>(initial?.via ? 'via' : initial?.local ? 'local' : 'agent');
   const [idTouched, setIdTouched] = useState(editing);
   const [err, setErr] = useState('');
@@ -149,8 +212,7 @@ export function ProbeForm({ initial, opened, onClose, hubURL }: { initial?: Prob
   const submit = async () => {
     setErr('');
     setBusy(true);
-    const labels = Object.fromEntries(Object.entries(p.labels ?? {}).filter(([k, v]) => v && k !== 'id'));
-    const body: ProbeConfig = { ...p, labels, via: mode === 'via' ? p.via : undefined, local: mode === 'local', probing: mode === 'agent' && !!p.probing };
+    const body = probeBody({ ...p, via: mode === 'via' ? p.via : undefined, local: mode === 'local', probing: mode === 'agent' && !checker && !!p.probing }, shown);
     try {
       const res = editing
         ? await api<{ install?: Install }>('PUT', `/api/v1/probes/${encodeURIComponent(p.id)}`, body)
@@ -190,15 +252,29 @@ export function ProbeForm({ initial, opened, onClose, hubURL }: { initial?: Prob
             <TextInput label={t('id')} value={p.id} disabled={editing} required onChange={(e) => { const id = e.currentTarget.value; setIdTouched(true); setP((x) => ({ ...x, id })); }} />
           </Group>
           {mode === 'agent' && (
+            <Stack gap={6}>
+              <Text size="sm" fw={500}>{t('role')}</Text>
+              <SegmentedControl value={checker ? 'checker' : 'server'} fullWidth
+                data={[{ value: 'server', label: t('r_server') }, { value: 'checker', label: t('r_checker') }]}
+                // Trusted belongs to a checker: the hub refuses it on anything else.
+                onChange={(v) => setP((x) => (v === 'checker' ? { ...x, role: 'checker' } : { ...x, role: undefined, trusted: undefined }))} />
+              {checker && <Text size="xs" c="dimmed">{t('r_checker_hint')}</Text>}
+            </Stack>
+          )}
+          {mode === 'agent' && !checker && (
             <Switch checked={!!p.probing} onChange={(e) => { const probing = e.currentTarget.checked; setP((x) => ({ ...x, probing })); }}
               label={t('probing')} description={t('probing_hint')} />
+          )}
+          {mode === 'agent' && checker && (
+            <Switch checked={!!p.trusted} color="orange" onChange={(e) => { const trusted = e.currentTarget.checked; setP((x) => ({ ...x, trusted })); }}
+              label={t('trusted')} description={t('trusted_hint')} />
           )}
           {mode === 'via' && (
             <Textarea label={t('via')} placeholder={t('via_ph')} autosize minRows={1} styles={{ input: { fontFamily: 'var(--mantine-font-family-monospace)', fontSize: 12 } }}
               value={p.via ?? ''} onChange={(e) => { const via = e.currentTarget.value.trim(); setP((x) => ({ ...x, via })); }} required />
           )}
           <Group grow align="flex-start">
-            <Select label={t('country')} description={t('country_hint')} searchable
+            <Select label={t('country')} description={netHint('country') ?? t('country_hint')} searchable
               data={countryOptions(lang)} clearable nothingFoundMessage={t('nothing')}
               filter={({ options, search }) => (options as { value: string }[]).filter((o) => countryMatches(o.value, search)) as typeof options}
               value={p.labels?.country ?? null} onChange={(v) => { picked.current = !!v; label('country', v ?? ''); }}
@@ -212,10 +288,11 @@ export function ProbeForm({ initial, opened, onClose, hubURL }: { initial?: Prob
               {geo.busy ? t('geo_busy') : geo.country ? t('geo_found', geo.ip ?? '', geo.source ?? '') : t('geo_unknown', geo.ip ?? '')}
             </Text>
           )}
-          <Group grow>
+          <Group grow align="flex-start">
             <TextInput label={t('city')} value={p.labels?.city ?? ''} onChange={(e) => label('city', e.currentTarget.value)} />
-            <Autocomplete label={t('isp')} data={['rostelecom', 'mts', 'beeline', 'megafon', 't2', 'dom.ru', 'selectel', 'timeweb', 'vk-cloud', 'reg.ru', 'hetzner']}
+            <Autocomplete label={t('isp')} description={netHint('isp')} data={['rostelecom', 'mts', 'beeline', 'megafon', 't2', 'dom.ru', 'selectel', 'timeweb', 'vk-cloud', 'reg.ru', 'hetzner']}
               value={p.labels?.isp ?? ''} onChange={(v) => label('isp', v)} />
+            {checker && <TextInput label={t('asn')} description={netHint('asn')} placeholder="as8359" value={p.labels?.asn ?? ''} onChange={(e) => label('asn', e.currentTarget.value.trim().toLowerCase())} />}
             <NumberInput label={t('concurrency')} min={1} max={128} placeholder="16" value={p.concurrency ?? ''} onChange={(v) => setP((x) => ({ ...x, concurrency: Number(v) || undefined }))} />
           </Group>
           <Group justify="flex-end">

@@ -4,14 +4,15 @@ import {
 } from '@mantine/core';
 import { IconAlertCircle, IconInfoCircle } from '@tabler/icons-react';
 import { useMemo, useState } from 'react';
-import { api, ApiError, queryClient, useChecks, useMeta, useProbes, type CatalogEntry, type CatalogField, type CheckConfig } from '../api';
-import { flag, parseGoDuration } from '../format';
+import { api, ApiError, queryClient, useChecks, useMeta, type CatalogEntry, type CatalogField, type CheckConfig } from '../api';
+import { parseGoDuration } from '../format';
 import { useParentLabels, useParentOptions } from './checks/parents';
 import { useGuardedClose } from './guards';
 import { compactDuration } from './SettingsKit';
 import { useCommon, useLang, useT } from '../i18n';
 import { checkText } from './checkText';
 import { CopyBlock, notifyOk } from './Misc';
+import { carriesSecrets, ProbePicker } from './ProbePicker';
 
 const L = {
   ru: {
@@ -34,8 +35,8 @@ const L = {
     needs_hint: 'Иначе проверка честно покажет «недоступно на этой пробе».', hub_only: 'Эта проверка работает на самом хабе, выбирать пробы не нужно.',
     schedule: 'Расписание и оповещения', interval: 'Интервал', timeout: 'Таймаут', retries: 'Неудач подряд до тревоги',
     min_failing: 'Минимум проб со сбоем', severity: 'Важность', sev_auto: 'Авто (не работает или блок значит критично)', sev_crit: 'Всегда критично', sev_warn: 'Только предупреждение',
-    probes: 'С каких проб проверять', probes_hint: 'Пусто значит со всех проб. Конкретную ноду можно выбрать, даже если на ней выключены пробы', exclude: 'Кроме',
-    all_probes: 'Все пробы', country: 'Страна', kind: 'Тип', probe: 'Проба', created: 'Проверка создана', updated: 'Сохранено',
+    probes: 'С каких проб проверять', probes_hint: 'Конкретный сервер можно выбрать, даже если на нём выключены проверки.', exclude: 'Кроме',
+    all_probes: 'Вся инфраструктура', created: 'Проверка создана', updated: 'Сохранено',
     bad_json: 'Некорректный JSON', t_xray: 'VPN-конфиг', d_xray: 'Реальный запрос через Xray-туннель: VLESS, VMess, Trojan, Shadowsocks, Hysteria2', t_mtproto: 'Telegram-прокси', d_mtproto: 'Обмен с Telegram через MTProxy или telemt',
   },
   en: {
@@ -58,8 +59,8 @@ const L = {
     needs_hint: 'Otherwise the check honestly says "not available on this probe".', hub_only: 'This check runs on the hub itself, no probes to pick.',
     schedule: 'Schedule and alerting', interval: 'Interval', timeout: 'Timeout', retries: 'Failures in a row before alerting',
     min_failing: 'Minimum failing probes', severity: 'Severity', sev_auto: 'Auto (down or blocked = critical)', sev_crit: 'Always critical', sev_warn: 'Warning only',
-    probes: 'Check from', probes_hint: 'Empty = all probes. A specific node can be picked even with probing off', exclude: 'Except',
-    all_probes: 'All probes', country: 'Country', kind: 'Kind', probe: 'Probe', created: 'Check created', updated: 'Saved',
+    probes: 'Check from', probes_hint: 'A specific server can be picked even with probing off.', exclude: 'Except',
+    all_probes: 'All infrastructure', created: 'Check created', updated: 'Saved',
     bad_json: 'Invalid JSON', t_xray: 'VPN config', d_xray: 'A real request through an Xray tunnel: VLESS, VMess, Trojan, Shadowsocks, Hysteria2', t_mtproto: 'Telegram proxy', d_mtproto: 'An exchange with Telegram through MTProxy or telemt',
   },
 };
@@ -148,7 +149,6 @@ export function CheckForm({ initial, opened, onClose }: { initial?: CheckConfig;
   const [pristine] = useState(() => snapshot([d, picked, src, json, headers]));
   const guard = useGuardedClose(snapshot([d, picked, src, json, headers]) !== pristine, onClose);
   const checks = useChecks({ live: false });
-  const probes = useProbes({ live: false });
 
   const set = (patch: Partial<CheckConfig>) => setD((x) => ({ ...x, ...patch }));
   const groups = useMemo(() => [...new Set((checks.data?.checks ?? []).map((r) => r.group).filter(Boolean) as string[])], [checks.data]);
@@ -173,17 +173,8 @@ export function CheckForm({ initial, opened, onClose }: { initial?: CheckConfig;
     }));
   }, [catalog, words]);
 
-  const selectorOptions = useMemo(() => {
-    const all = probes.data?.probes ?? [];
-    const ps = all.filter((p) => p.mode !== 'agent' || p.config.probing);
-    const countries = [...new Set(ps.map((p) => p.labels?.country).filter(Boolean) as string[])].sort();
-    const kinds = [...new Set(ps.map((p) => p.labels?.kind).filter(Boolean) as string[])].sort();
-    return [
-      { group: t('country'), items: countries.map((x) => ({ value: `country=${x}`, label: `${flag(x)} ${x.toUpperCase()}` })) },
-      { group: t('kind'), items: kinds.map((x) => ({ value: `kind=${x}`, label: x })) },
-      { group: t('probe'), items: all.map((p) => ({ value: `id=${p.id}`, label: `${flag(p.region)} ${p.name}` })) },
-    ].filter((g) => g.items.length);
-  }, [probes.data, t]);
+  // Untrusted checker agents never get a check with a VPN link or a password.
+  const secrets = carriesSecrets(d, catalog);
 
   const pick = (k: string) => {
     const e = catalog.find((x) => key(x) === k);
@@ -416,7 +407,8 @@ export function CheckForm({ initial, opened, onClose }: { initial?: CheckConfig;
         {info?.hub_only ? (
           <Text size="xs" c="dimmed">{t('hub_only')}</Text>
         ) : (
-          <MultiSelect label={t('probes')} description={t('probes_hint')} placeholder={t('all_probes')} data={selectorOptions} value={d.probes ?? []} onChange={(v) => set({ probes: v })} searchable clearable />
+          <ProbePicker mode="selectors" summary label={t('probes')} description={t('probes_hint')} placeholder={t('all_probes')} secrets={secrets}
+            value={d.probes ?? []} exclude={d.exclude} onChange={(v) => set({ probes: v })} />
         )}
         <Accordion variant="contained" radius="md">
           <Accordion.Item value="schedule">
@@ -457,7 +449,7 @@ export function CheckForm({ initial, opened, onClose }: { initial?: CheckConfig;
                   <NumberInput label={t('min_failing')} min={1} max={20} placeholder="1" value={d.min_failing ?? ''} onChange={(v) => set({ min_failing: Number(v) || undefined })} />
                 </Group>
                 <Select label={t('severity')} data={[{ value: '', label: t('sev_auto') }, { value: 'critical', label: t('sev_crit') }, { value: 'warning', label: t('sev_warn') }]} value={d.severity ?? ''} onChange={(v) => set({ severity: (v ?? '') as CheckConfig['severity'] })} allowDeselect={false} />
-                {!info?.hub_only && <MultiSelect label={t('exclude')} data={selectorOptions} value={d.exclude ?? []} onChange={(v) => set({ exclude: v })} searchable clearable />}
+                {!info?.hub_only && <ProbePicker mode="selectors" label={t('exclude')} value={d.exclude ?? []} onChange={(v) => set({ exclude: v })} />}
               </Stack>
             </Accordion.Panel>
           </Accordion.Item>

@@ -1,5 +1,5 @@
 import {
-  Alert, Badge, Box, Button, Card, Code, Group, MultiSelect, Progress, SegmentedControl, SimpleGrid, Stack, Text, TextInput, Textarea,
+  Alert, Badge, Box, Button, Card, Code, Group, Progress, SegmentedControl, SimpleGrid, Stack, Text, TextInput, Textarea,
   Tooltip,
 } from '@mantine/core';
 import {
@@ -7,11 +7,13 @@ import {
 } from '@tabler/icons-react';
 import { useMutation } from '@tanstack/react-query';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { api, ApiError, useProbes, type ProbeStatus, type RunOutcome, type RunRow } from '../api';
+import { useSearchParams } from 'react-router';
+import { api, ApiError, isChecker, useProbes, type ProbeRow, type RunOutcome, type RunRow } from '../api';
 import { Section } from '../components/Cards';
 import { PageHeader } from '../components/Misc';
+import { ProbePicker } from '../components/ProbePicker';
 import { classify, useReason, useWhy } from '../components/ProbeLines';
-import { Dot, KindIcon, kindColor, Legend, VerdictBadge } from '../components/Status';
+import { KindIcon, kindColor, Legend, VerdictBadge } from '../components/Status';
 import { flag, ms } from '../format';
 import { plural, useLang, useT } from '../i18n';
 import { status } from '../theme';
@@ -23,7 +25,7 @@ const L = {
     target_hint: 'Ссылка vless:// vmess:// trojan:// ss:// hy2://, MTProxy tg://proxy или t.me/proxy, http(s)-адрес или host:port',
     sub_hint: 'Хаб скачает подписку и проверит каждый конфиг (до 100) с выбранных проб',
     ua: 'User-Agent', ua_hint: 'Необязательно. Панели (Remnawave, Marzban, 3x-ui) выбирают формат ответа по User-Agent',
-    probes: 'С каких проб', probes_hint: 'По умолчанию — все онлайн', all_online: 'Все онлайн', offline: 'офлайн', no_net: 'без интернета',
+    probes: 'С каких проб', probes_hint: 'По умолчанию — вся инфраструктура онлайн. Агентов проверок выбирайте явно', all_online: 'Вся инфраструктура онлайн',
     run: 'Проверить', running: 'Проверяем… {0} с', running_hint: 'Ждём ответы всех проб — обычно до 30 секунд',
     running_sub: 'Подписка проверяется по 8 конфигов параллельно — это может занять пару минут',
     result: 'Результат', latency: 'задержка', failed_after: 'ошибка через', speed: 'скорость', mbps: 'Мбит/с', exit: 'Выход в интернет', phases: 'Фазы',
@@ -41,7 +43,7 @@ const L = {
     target_hint: 'A vless:// vmess:// trojan:// ss:// hy2:// link, a tg://proxy or t.me/proxy MTProxy link, an http(s) URL or host:port',
     sub_hint: 'The hub downloads the subscription and checks every config (up to 100) from the selected probes',
     ua: 'User-Agent', ua_hint: 'Optional. Panels (Remnawave, Marzban, 3x-ui) pick the response format by User-Agent',
-    probes: 'From probes', probes_hint: 'Defaults to every online probe', all_online: 'All online', offline: 'offline', no_net: 'no internet',
+    probes: 'From probes', probes_hint: 'Defaults to all online infrastructure. Pick checker agents explicitly', all_online: 'All online infrastructure',
     run: 'Run', running: 'Checking… {0}s', running_hint: 'Waiting for every probe to answer — usually under 30 seconds',
     running_sub: 'Configs are checked 8 at a time — this can take a couple of minutes',
     result: 'Result', latency: 'latency', failed_after: 'failed after', speed: 'throughput', mbps: 'Mbit/s', exit: 'Exits to the internet', phases: 'Phases',
@@ -63,6 +65,20 @@ function verdictLines(outcomes: RunOutcome[], noNet: Set<string>) {
   return outcomes
     .filter((o) => o.result && !noNet.has(o.probe))
     .map((o) => ({ ok: o.result!.status === 'up', region: o.region, reason: o.result!.reason, bytes: o.result!.bytes }));
+}
+
+/**
+ * targetCarriesSecrets guesses, as SpecFor parses it, whether a pasted target
+ * is a check with secrets: a share link (any scheme but http/https) or an
+ * MTProxy link (tg://, t.me/proxy with its secret).
+ */
+function targetCarriesSecrets(target: string) {
+  const s = target.trim();
+  const m = /^([a-z][a-z0-9+.-]*):\/\//i.exec(s);
+  if (!m) return false;
+  const scheme = m[1].toLowerCase();
+  if (scheme !== 'http' && scheme !== 'https') return true;
+  return /^https?:\/\/(www\.)?t(elegram)?\.me\/proxy\?/i.test(s);
 }
 
 function mbps(bps?: number) {
@@ -332,21 +348,28 @@ function SubscriptionResult({ rows, noNet }: { rows: RunRow[]; noNet: Set<string
 export default function Tools() {
   const t = useT(L);
   const probesQ = useProbes();
+  const [params] = useSearchParams();
   const [mode, setMode] = useState<Mode>('auto');
   const [target, setTarget] = useState('');
   const [ua, setUa] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const inited = useRef(false);
-  const probes: ProbeStatus[] = probesQ.data?.probes ?? [];
-  const online = probes.filter((p) => p.online).map((p) => p.id);
+  const probes: ProbeRow[] = probesQ.data?.probes ?? [];
+  // Checker agents run only what is aimed at them: the default is our own infrastructure.
+  const online = probes.filter((p) => p.online && !isChecker(p)).map((p) => p.id);
   const noNet = useMemo(() => new Set(probes.filter((p) => p.online && !p.internet).map((p) => p.id)), [probes]);
 
+  // ?probe=<id> (from "Check from here") picks that one probe.
   useEffect(() => {
     if (!inited.current && probesQ.data) {
       inited.current = true;
-      setSelected(probesQ.data.probes.filter((p) => p.online).map((p) => p.id));
+      const want = params.get('probe');
+      setSelected(want && probesQ.data.probes.some((p) => p.id === want) ? [want]
+        : probesQ.data.probes.filter((p) => p.online && !isChecker(p)).map((p) => p.id));
     }
-  }, [probesQ.data]);
+  }, [probesQ.data, params]);
+  // A VPN link, an MTProxy secret or a subscription: untrusted checker agents may not see it.
+  const secrets = mode === 'subscription' || targetCarriesSecrets(target);
 
   const run = useMutation<{ rows: RunRow[]; mode: Mode }, ApiError, void>({
     mutationFn: async () => {
@@ -410,31 +433,7 @@ export default function Tools() {
                 />
               </SimpleGrid>
             )}
-            <MultiSelect
-              label={t('probes')}
-              description={t('probes_hint')}
-              data={probes.map((p) => ({
-                value: p.id,
-                label: `${flag(p.region) || '📍'} ${p.name}`,
-                disabled: !p.online,
-              }))}
-              renderOption={({ option }) => {
-                const p = probes.find((x) => x.id === option.value);
-                return (
-                  <Group gap={8} wrap="nowrap">
-                    <Dot color={!p?.online ? status.down : !p.internet ? status.partial : status.ok} />
-                    <Text size="sm">{option.label}</Text>
-                    {p && !p.online && <Text size="xs" c="dimmed">{t('offline')}</Text>}
-                    {p?.online && !p.internet && <Text size="xs" c="dimmed">{t('no_net')}</Text>}
-                  </Group>
-                );
-              }}
-              value={selected}
-              onChange={setSelected}
-              searchable
-              clearable
-              hidePickedOptions={false}
-            />
+            <ProbePicker mode="ids" label={t('probes')} description={t('probes_hint')} secrets={secrets} value={selected} onChange={setSelected} />
             <Group justify="space-between" wrap="wrap" gap="sm">
               <Button variant="subtle" size="xs" onClick={() => setSelected(online)} disabled={!probes.length}>{t('all_online')}</Button>
               <Button

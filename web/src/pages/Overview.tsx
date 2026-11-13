@@ -2,7 +2,7 @@ import { Anchor, Badge, Box, Card, Group, Skeleton, Stack, Text, UnstyledButton 
 import { IconAlertTriangle, IconArrowDownRight, IconArrowUpRight, IconCircleCheck, IconCircleX } from '@tabler/icons-react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
-import { enc, useOverview, useProbes, type Incident, type Overview as OverviewData } from '../api';
+import { enc, isChecker, useOverview, useProbes, type Incident, type Overview as OverviewData } from '../api';
 import { Section } from '../components/Cards';
 import { PageHeader, ProbeName, QueryError } from '../components/Misc';
 import { RemnawaveHero } from '../components/RemnawaveHero';
@@ -111,7 +111,10 @@ function Strip({ data }: { data: OverviewData }) {
   const color = incidents === 0 ? status.ok : critical > 0 ? status.down : status.partial;
   const word = lang === 'ru' ? plural(incidents, t('incident_one'), t('incident_few'), t('incident_many')) : incidents === 1 ? t('incident_one') : t('incident_many');
   const I = incidents === 0 ? IconCircleCheck : critical > 0 ? IconCircleX : IconAlertTriangle;
-  const offline = (k.probes ?? 0) - (k.probes_online ?? 0);
+  // Servers are our infrastructure: a checker agent going offline is no news here.
+  const servers = (data.probes ?? []).filter((p) => !isChecker(p));
+  const online = servers.filter((p) => p.online).length;
+  const offline = servers.length - online;
   const bad = (k.down ?? 0) + (k.blocked ?? 0) + (k.partial ?? 0);
   return (
     <Box className="uf-strip">
@@ -119,7 +122,7 @@ function Strip({ data }: { data: OverviewData }) {
         value={incidents > 0 ? t('problems', incidents, word) : t('all_good')} sub={incidents > 0 ? t('critical_sub', critical) : undefined} />
       <StripCell to="/checks" label={t('checks_ok')} value={`${k.ok ?? 0} / ${k.checks ?? 0}`} color={bad ? status.down : undefined}
         sub={bad ? t('bad_sub', bad) : (k.paused ? `${t('paused')} ${k.paused}` : undefined)} />
-      <StripCell to="/" label={t('servers_online')} value={`${k.probes_online ?? 0} / ${k.probes ?? 0}`} color={offline ? status.down : undefined}
+      <StripCell to="/" label={t('servers_online')} value={`${online} / ${servers.length}`} color={offline ? status.down : undefined}
         sub={offline ? `${t('offline')} ${offline}` : undefined} />
       <StripCell to="/" label={t('traffic')} value={bitrate(data.traffic.rx + data.traffic.tx)}
         sub={<Group gap={6} wrap="nowrap" component="span"><IconArrowDownRight size={12} />{bitrate(data.traffic.rx)}<IconArrowUpRight size={12} />{bitrate(data.traffic.tx)}</Group>} />

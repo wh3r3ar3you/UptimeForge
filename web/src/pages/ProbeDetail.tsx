@@ -1,5 +1,5 @@
 import {
-  Alert, Anchor, Badge, Box, Breadcrumbs, Button, Card, Group, Menu, SimpleGrid, Skeleton, Stack, Table, Text,
+  Alert, Anchor, Badge, Box, Breadcrumbs, Button, Card, Group, Menu, SimpleGrid, Skeleton, Stack, Table, Text, Tooltip,
 } from '@mantine/core';
 import { modals } from '@mantine/modals';
 import {
@@ -7,7 +7,7 @@ import {
 } from '@tabler/icons-react';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { api, enc, queryClient, useChecks, useMeta, useOverview, useProbes, type Install } from '../api';
+import { api, enc, isChecker, queryClient, useChecks, useMeta, useOverview, useProbes, type Install, type NetworkView } from '../api';
 import { Section, StatCard, Tiles } from '../components/Cards';
 import { HostCharts } from '../components/HostCharts';
 import { clickableRow, notifyError, notifyOk, PageHeader, QueryError } from '../components/Misc';
@@ -32,6 +32,10 @@ const L = {
     host_since: 'Выше порога уже {0}', of: 'из {0}', deleted: 'Проба удалена', new_token: 'Новый токен', via: 'Прокси', never: 'Агент ещё ни разу не подключался. Покажем команду установки с новым токеном: прежний токен перестанет работать.',
     never_viewer: 'Агент ещё ни разу не подключался.', show_install: 'Показать команду установки',
     more: 'Ещё действия', vcpu: '{0} vCPU', iowait_steal: 'iowait {0}% · steal {1}%', tcp_n: 'TCP {0}', load_failed: 'Не удалось загрузить серверы',
+    network: 'Сеть', n_country: 'Страна', n_isp: 'Оператор', n_asn: 'ASN', n_ip: 'IP-адрес', n_ip_hint: 'Видят только администраторы', n_at: 'Определено {0}',
+    checkers: 'Агенты проверок', m_checker: 'агент проверок', trusted: 'доверенный', untrusted: 'недоверенный',
+    no_metrics_checker: 'Агент проверок не присылает метрики хоста: это чужая машина, её нагрузка нас не касается.',
+    confirm_checker: 'Удалить агента проверок «{0}»? Его токен перестанет работать; чтобы вернуть точку, нужно новое приглашение.',
   },
   en: {
     probes: 'All systems', edit: 'Edit', rotate: 'Rotate token', delete: 'Delete', online: 'online', offline: 'offline',
@@ -45,6 +49,10 @@ const L = {
     host_since: 'Above the threshold for {0}', of: 'of {0}', deleted: 'Probe deleted', new_token: 'New token', via: 'Proxy', never: 'The agent has never connected. Get the install command with a new token: the previous token stops working.',
     never_viewer: 'The agent has never connected.', show_install: 'Show install command',
     more: 'More actions', vcpu: '{0} vCPU', iowait_steal: 'iowait {0}% · steal {1}%', tcp_n: 'TCP {0}', load_failed: 'Could not load the servers',
+    network: 'Network', n_country: 'Country', n_isp: 'Operator', n_asn: 'ASN', n_ip: 'IP address', n_ip_hint: 'Only admins see it', n_at: 'Looked up {0}',
+    checkers: 'Checker agents', m_checker: 'checker agent', trusted: 'trusted', untrusted: 'untrusted',
+    no_metrics_checker: 'A checker agent sends no host metrics: it is someone else’s machine and its load is none of our business.',
+    confirm_checker: 'Delete checker agent “{0}”? Its token stops working; bringing the point back takes a new invite.',
   },
 };
 
@@ -55,6 +63,25 @@ function Info({ label, value }: { label: string; value?: React.ReactNode }) {
       <Text size="xs" c="dimmed" fw={600} tt="uppercase" style={{ letterSpacing: '0.06em' }}>{label}</Text>
       <Text size="sm" fw={500} component="div">{value}</Text>
     </Stack>
+  );
+}
+
+/** NetworkCard is where an agent connects from. The address is its owner's home: admins only (the hub strips it for viewers). */
+function NetworkCard({ n, admin }: { n: NetworkView; admin: boolean }) {
+  const t = useT(L);
+  const { lang } = useLang();
+  return (
+    <Section title={t('network')}>
+      <Card>
+        <SimpleGrid cols={{ base: 2, sm: 4 }} spacing="lg">
+          <Info label={t('n_country')} value={n.country ? `${flag(n.country)} ${n.country.toUpperCase()}` : '—'} />
+          <Info label={t('n_isp')} value={n.org || n.isp || '—'} />
+          <Info label={t('n_asn')} value={n.asn ? <Text span ff="monospace" size="sm">{n.asn.toUpperCase()}</Text> : '—'} />
+          {admin && <Info label={t('n_ip')} value={n.ip ? <Tooltip label={t('n_ip_hint')}><Text span ff="monospace" size="sm">{n.ip}</Text></Tooltip> : '—'} />}
+        </SimpleGrid>
+        {n.at && <Text size="xs" c="dimmed" mt="sm">{t('n_at', ago(n.at, lang))}</Text>}
+      </Card>
+    </Section>
   );
 }
 
@@ -81,16 +108,18 @@ export default function ProbeDetail() {
   const m = p.metrics && p.metrics_at && Date.now() - Date.parse(p.metrics_at) < 120_000 ? p.metrics : undefined;
   const si = p.sysinfo;
   const rows = (checks.data?.checks ?? []).filter((r) => r.probes.some((x) => x.probe === id));
+  const checker = isChecker(p);
+  const home = checker ? '/checkers' : '/';
 
   const remove = () => modals.openConfirmModal({
-    title: t('delete'), children: <Text size="sm">{t('confirm', p.name)}</Text>, labels: { confirm: t('delete'), cancel: c('cancel') },
+    title: t('delete'), children: <Text size="sm">{t(checker ? 'confirm_checker' : 'confirm', p.name)}</Text>, labels: { confirm: t('delete'), cancel: c('cancel') },
     confirmProps: { color: 'red' },
     onConfirm: async () => {
       try {
         await api('DELETE', `/api/v1/probes/${enc(id)}`);
         await queryClient.invalidateQueries();
         notifyOk(t('deleted'));
-        nav('/');
+        nav(home);
       } catch (e) {
         notifyError(e);
       }
@@ -127,16 +156,17 @@ export default function ProbeDetail() {
     <Stack gap="xl">
       <Box>
         <Breadcrumbs mb="xs" separator="›">
-          <Anchor component={Link} to="/" size="sm">{t('probes')}</Anchor>
+          <Anchor component={Link} to={home} size="sm">{t(checker ? 'checkers' : 'probes')}</Anchor>
           <Text size="sm" c="dimmed">{p.name}</Text>
         </Breadcrumbs>
         <PageHeader
-          title={`${flag(p.region) || '📍'} ${p.name}`}
+          title={`${flag(p.region || p.network?.country) || '📍'} ${p.name}`}
           subtitle={
             <Group gap="xs" component="span">
               <OnlineDot online={p.online} internet={p.internet} />
               <Text span size="sm">{stateText}</Text>
-              <Badge variant="default" radius="sm">{t(`m_${p.mode}`)}</Badge>
+              <Badge variant="default" radius="sm">{checker ? t('m_checker') : t(`m_${p.mode}`)}</Badge>
+              {checker && <Badge variant="light" color={p.config.trusted ? 'forge' : 'gray'} radius="sm">{t(p.config.trusted ? 'trusted' : 'untrusted')}</Badge>}
               {p.host && <Text span size="sm" c="dimmed" ff="monospace">{p.host}</Text>}
               {p.managed && <Badge variant="outline" color="gray">{c('managed')}</Badge>}
             </Group>
@@ -191,7 +221,7 @@ export default function ProbeDetail() {
           <Info label={t('cpu_model')} value={si?.cpu_model ? `${si.cpu_model}${si.cores ? ` × ${si.cores}` : ''}` : undefined} />
           <Info label={t('ram')} value={si?.mem_total ? bytes(si.mem_total) : undefined} />
           <Info label={t('boot')} value={m ? days(m.uptime, lang) : undefined} />
-          <Info label={t('agent')} value={p.version ? `${p.version} · ${si?.arch ?? ''}` : undefined} />
+          <Info label={t('agent')} value={p.version ? [p.version, si?.arch].filter(Boolean).join(' · ') : undefined} />
           <Info label={t('nics')} value={si?.nics?.length ? `${si.nics.join(', ')}${si.link_mbps ? ` · ${t('link', `${si.link_mbps >= 1000 ? `${si.link_mbps / 1000} Gbps` : `${si.link_mbps} Mbps`}`)}` : ''}` : undefined} />
           <Info label={t('via')} value={p.config.via ? <Text span ff="monospace" size="xs">{p.config.via.replace(/\/\/[^@]*@/, '//•••@')}</Text> : undefined} />
           <Info label={t('labels')} value={
@@ -200,8 +230,11 @@ export default function ProbeDetail() {
         </SimpleGrid>
       </Card>
 
-      {p.mode !== 'via' && <HostCharts id={id} cores={si?.cores} />}
+      {p.network && <NetworkCard n={p.network} admin={isAdmin} />}
+
+      {p.mode !== 'via' && !checker && <HostCharts id={id} cores={si?.cores} />}
       {p.mode === 'via' && <Text c="dimmed" size="sm">{t('no_metrics')}</Text>}
+      {checker && <Text c="dimmed" size="sm">{t('no_metrics_checker')}</Text>}
 
       <Section title={t('checks')}>
         <Card padding={0}>
@@ -238,7 +271,7 @@ export default function ProbeDetail() {
         </Card>
       </Section>
 
-      {editing && <ProbeForm opened={editing} onClose={() => setEditing(false)} initial={p.config} hubURL={probes.data?.hub_url ?? ''} />}
+      {editing && <ProbeForm opened={editing} onClose={() => setEditing(false)} initial={p.config} network={p.network} hubURL={probes.data?.hub_url ?? ''} />}
       <TokenModal install={install} hubURL={probes.data?.hub_url ?? ''} title={t('new_token')} onClose={() => setInstall(null)} />
     </Stack>
   );

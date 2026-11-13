@@ -58,7 +58,11 @@ export interface ProbeStatus {
   id: string; name: string; labels: Record<string, string>; region?: string; mode: 'agent' | 'via' | 'local';
   online: boolean; internet: boolean; since: string; version?: string; host?: string;
   sysinfo?: SysInfo; metrics?: Metrics; metrics_at?: string; checks: number; failing: number;
+  /** Where an agent connects from; the address only for admins. */
+  network?: NetworkView;
 }
+
+export interface NetworkView { ip?: string; country?: string; asn?: string; org?: string; isp?: string; at: string }
 
 export interface Spec {
   id: string; type: string; interval?: string; timeout?: string;
@@ -94,13 +98,27 @@ export interface TelegramRule { tags?: string[]; groups?: string[]; events?: str
 export interface ProbeConfig {
   id: string; name: string; labels?: Record<string, string>; concurrency?: number; baseline?: Spec[];
   via?: string; local?: boolean; probing?: boolean;
+  /** '' or 'server': our infrastructure; 'checker': a volunteer probe point. Agents only. */
+  role?: '' | 'server' | 'checker';
+  /** A checker that may run checks carrying secrets (VPN links, passwords). */
+  trusted?: boolean;
+  /** Labels set by hand: the network lookup leaves them alone. */
+  labels_locked?: string[];
 }
+
+/** isChecker: a volunteer probe point, not our infrastructure. */
+export const isChecker = (p: { config?: ProbeConfig; labels?: Record<string, string> }) =>
+  p.config?.role === 'checker' || p.labels?.role === 'checker';
 
 export interface ProbeRow extends ProbeStatus {
   config: ProbeConfig; managed: boolean;
   /** Bytes moved over the last day, from stored metrics. */
   traffic_24h?: { rx: number; tx: number };
 }
+
+/** An invite code for a checker agent; the code itself is shown once, on creation. */
+export interface Invite { id: string; name?: string; trusted: boolean; created: string; expires: string; used: boolean }
+export interface InviteCreated { invite: Invite; code: string; command: string; expires: string; warning?: string }
 
 export interface Install { token: string; compose: string; compose_cmd: string; script: string; docker: string; binary: string; warning?: string }
 
@@ -323,6 +341,8 @@ export const useRemnawaveUsers = (q: string, enabled = true) =>
     refetchInterval: q.startsWith('from=') ? false : 60_000,
     placeholderData: (prev) => prev,
   });
+export const useInvites = (enabled = true) =>
+  useQuery({ enabled, queryKey: ['invites'], queryFn: () => api<{ invites: Invite[] | null }>('GET', '/api/v1/checkers/invites'), refetchInterval: 30_000 });
 export const useUsers = () => useQuery({ queryKey: ['users'], queryFn: () => api<User[]>('GET', '/api/v1/users') });
 export const useStatusPages = () => useQuery({ queryKey: ['status-pages'], queryFn: () => api<StatusPage[]>('GET', '/api/v1/status-pages') });
 
