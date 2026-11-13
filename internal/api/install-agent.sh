@@ -88,6 +88,7 @@ if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
     printf 'UF_HUB=%s\nUF_STATE_DIR=%s\n' "$UF_HUB" "$STATE_DIR"
     [ -z "${UF_TOKEN:-}" ] || printf 'UF_TOKEN=%s\n' "$UF_TOKEN"
     [ -z "${UF_JOIN:-}" ] || printf 'UF_JOIN=%s\n' "$UF_JOIN"
+    [ "${UF_INSECURE:-}" != 1 ] || printf 'UF_INSECURE=1\n'
   } > /etc/uptimeforge/agent.env
   chown root:uptimeforge /etc/uptimeforge/agent.env
   chmod 0640 /etc/uptimeforge/agent.env
@@ -127,10 +128,12 @@ STATE_DIR=/etc/uptimeforge-agent
 [ "$initdir" != /opt/etc/init.d ] || STATE_DIR=/opt/var/lib/uptimeforge-agent
 umask 077
 mkdir -p "$STATE_DIR"
+insecure=""
+[ "${UF_INSECURE:-}" != 1 ] || insecure="UF_INSECURE=1"
 cat > "$initdir/S99uptimeforge-agent" <<INIT
 #!/bin/sh
 case "\$1" in
-  start) UF_HUB='$UF_HUB' UF_TOKEN='${UF_TOKEN:-}' UF_JOIN='${UF_JOIN:-}' UF_STATE_DIR='$STATE_DIR' nohup $BIN >/tmp/uptimeforge-agent.log 2>&1 & ;;
+  start) UF_HUB='$UF_HUB' UF_TOKEN='${UF_TOKEN:-}' UF_JOIN='${UF_JOIN:-}' UF_STATE_DIR='$STATE_DIR' $insecure nohup $BIN >/tmp/uptimeforge-agent.log 2>&1 & ;;
   stop) killall uptimeforge-agent 2>/dev/null ;;
   restart) "\$0" stop; sleep 1; "\$0" start ;;
 esac

@@ -2,8 +2,8 @@
 # UptimeForge checker agent, one command, served by your hub at /join.sh:
 #   curl -fsSL https://hub.example.com/join.sh | sudo sh -s -- INVITE_CODE
 # Runs the agent in a locked-down Docker container. Docker is installed only
-# when the machine has none at all; an existing engine is never touched (at
-# most its compose plugin is added from the distro's own packages). Where
+# when the machine has none at all; an existing engine is never touched, and
+# without `docker compose` the binary is installed instead. Where
 # Docker cannot be had (a router, an unsupported system) it installs the agent
 # binary as a service instead.
 # The invite code is single use: the agent swaps it for a token on first start.
@@ -68,20 +68,6 @@ install_docker() {
   have_compose
 }
 
-# Docker is there without `docker compose`: add the plugin from the distro's
-# own repositories and leave the engine alone.
-install_compose_plugin() {
-  case "$os_id" in
-    debian|ubuntu)
-      apt-get install -y docker-compose-v2 || apt-get install -y docker-compose-plugin || return 1 ;;
-    fedora|centos|rhel|rocky|almalinux)
-      { dnf install -y docker-compose-plugin || yum install -y docker-compose-plugin; } || return 1 ;;
-    alpine)
-      apk add --no-cache docker-cli-compose || return 1 ;;
-    *) return 1 ;;
-  esac
-  have_compose
-}
 
 # The agent is up when its service says so a few seconds after the start;
 # otherwise the last log lines are shown and the script fails.
@@ -116,8 +102,8 @@ if ! have_docker; then
   install_docker || binary_fallback
 fi
 if ! have_compose; then
-  echo "docker compose not found: trying to add the compose plugin"
-  install_compose_plugin || binary_fallback
+  echo "Docker is installed without the compose plugin: not touching the engine or its packages" >&2
+  binary_fallback
 fi
 
 umask 077

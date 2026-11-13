@@ -338,11 +338,13 @@ func joinScriptFor(t *testing.T) string {
 	return f
 }
 
+// withoutCompose is a Docker engine with no compose plugin.
+const withoutCompose = `[ "$1 $2" = "compose version" ] && exit 1; exit 0`
+
 // runJoin runs the script with stub commands in front of PATH. Each stub
-// appends its name and arguments to the returned log; `docker compose
-// version` fails (Docker engine without the compose plugin) and everything
-// that would install or download fails too.
-func runJoin(t *testing.T, env []string, args ...string) (out string, code int, calls string) {
+// appends its name and arguments to the returned log; docker behaves as
+// dockerBody says, and everything that would install or download fails.
+func runJoin(t *testing.T, dockerBody string, env []string, args ...string) (out string, code int, calls string) {
 	t.Helper()
 	sh, err := exec.LookPath("sh")
 	if err != nil {
@@ -359,11 +361,12 @@ func runJoin(t *testing.T, env []string, args ...string) (out string, code int, 
 		}
 	}
 	stub("id", "echo 0")
-	stub("docker", `[ "$1 $2" = "compose version" ] && exit 1; exit 0`)
+	stub("docker", dockerBody)
 	for _, n := range []string{"curl", "wget", "apt-get", "dnf", "yum", "apk"} {
 		stub(n, "exit 1")
 	}
 	stub("systemctl", "exit 0")
+	stub("sleep", "exit 0")
 	cmd := exec.Command(sh, append([]string{script}, args...)...)
 	cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"UF_DIR="+filepath.ToSlash(filepath.Join(dir, "agent")))
@@ -378,77 +381,53 @@ func runJoin(t *testing.T, env []string, args ...string) (out string, code int, 
 	return string(b), code, string(c)
 }
 
+var httpsHub = []string{"UF_HUB=https://hub.example.com"}
+
 // A bad or missing code stops the script before it touches anything.
 func TestJoinScriptRejectsBadCode(t *testing.T) {
 	for _, args := range [][]string{{"a;b"}, {}} {
-		out, code, calls := runJoin(t, []string{"UF_HUB=https://hub.example.com", "UF_JOIN="}, args...)
+		out, code, calls := runJoin(t, withoutCompose, append([]string{"UF_JOIN="}, httpsHub...), args...)
 		if code != 1 || calls != "" {
 			t.Errorf("args %q: exit %d, calls %q\n%s", args, code, calls, out)
 		}
 	}
 }
 
-// Docker is on the machine but has no compose plugin: the engine must not be
-// reinstalled with get.docker.com, whatever else happens.
-func TestJoinScriptKeepsExistingDocker(t *testing.T) {
-	out, code, calls := runJoin(t, []string{"UF_HUB=https://hub.example.com"}, "abc123")
-	if strings.Contains(calls, "get.docker.com") {
-		t.Fatalf("the Docker engine was reinstalled:\n%s\n%s", calls, out)
+// Docker is on the machine but has no compose plugin: no package is installed
+// and the engine is left alone (a package could replace docker-ce or add a
+// second engine); the agent goes in as a binary instead.
+func TestJoinScriptLeavesExistingDockerAlone(t *testing.T) {
+	out, code, calls := runJoin(t, withoutCompose, httpsHub, "abc123")
+	for _, bad := range []string{"get.docker.com", "apt-get", "dnf", "yum", "apk"} {
+		if strings.Contains(calls, bad) {
+			t.Errorf("%s was called with Docker present:\n%s\n%s", bad, calls, out)
+		}
 	}
 	if code == 0 || !strings.Contains(calls, "install.sh") {
 		t.Errorf("without compose it must fall back to the binary installer (exit %d):\n%s\n%s", code, calls, out)
 	}
 }
 
-// Docker is absent: the official installer is the way (and the script
-// guards it with a check for the docker binary).
-func TestJoinScriptInstallsDockerOnlyWhenAbsent(t *testing.T) {
-	b, err := os.ReadFile(joinScriptFor(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(b)
-	guard := strings.Index(s, "if ! have_docker; then")
-	call := strings.Index(s, "install_docker ||")
-	if guard < 0 || call < guard {
-		t.Errorf("install_docker must be called only under `if ! have_docker` (guard %d, call %d)", guard, call)
-	}
-	if n := strings.Count(s, "get.docker.com"); n != 1 {
-		t.Errorf("get.docker.com must appear once, inside install_docker: %d", n)
-	}
-}
-
 // The agent refuses plain http outside loopback without UF_INSECURE=1, so the
 // script says so instead of installing an agent that never starts.
 func TestJoinScriptRefusesPlainHTTP(t *testing.T) {
-	out, code, calls := runJoin(t, []string{"UF_HUB=http://hub.example.com", "UF_INSECURE="}, "abc123")
+	out, code, calls := runJoin(t, withoutCompose, []string{"UF_HUB=http://hub.example.com", "UF_INSECURE="}, "abc123")
 	if code != 1 || calls != "" || !strings.Contains(out, "UF_INSECURE=1") {
 		t.Errorf("exit %d, calls %q\n%s", code, calls, out)
 	}
 }
 
-// A failed pull (Docker Hub unreachable) must not send a machine that
-// already has the image to the binary fallback; only `up -d` failing does.
+// A failed pull (registry unreachable) must not send a machine that already
+// has the image to the binary fallback: the container is started anyway.
 func TestJoinScriptPullFailureIsNotFatal(t *testing.T) {
-	b, err := os.ReadFile(joinScriptFor(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(b)
-	i := strings.Index(s, "docker compose pull")
-	j := strings.Index(s, "docker compose up -d")
-	if i < 0 || j < i {
-		t.Fatalf("pull then up expected")
-	}
-	pull := s[i:j]
-	if !strings.Contains(pull, "||") {
-		t.Errorf("a failed pull must be tolerated explicitly:\n%s", pull)
-	}
-	if strings.Contains(pull, "binary_fallback") {
-		t.Errorf("a failed pull falls back to the binary:\n%s", pull)
-	}
-	if !strings.Contains(s[j:], "binary_fallback") {
-		t.Errorf("a failed up must fall back to the binary")
+	docker := `case "$1 $2" in
+  "compose pull") exit 1 ;;
+  "inspect -f") echo "true false" ;;
+esac
+exit 0`
+	out, code, calls := runJoin(t, docker, httpsHub, "abc123")
+	if code != 0 || strings.Contains(calls, "install.sh") || !strings.Contains(calls, "docker compose up -d") {
+		t.Errorf("exit %d\n%s\n%s", code, calls, out)
 	}
 }
 
@@ -456,5 +435,17 @@ func TestJoinScriptPullFailureIsNotFatal(t *testing.T) {
 func TestInstallScriptKeepsStateOnFlash(t *testing.T) {
 	if !strings.Contains(installScript, "STATE_DIR=/etc/uptimeforge-agent") {
 		t.Errorf("init.d installs need a persistent state dir")
+	}
+}
+
+// UF_INSECURE=1 reaches the binary agent only when the operator set it: in
+// the systemd env file and in the init.d start line.
+func TestInstallScriptPassesInsecureOnlyWhenSet(t *testing.T) {
+	if !strings.Contains(installScript, `[ "${UF_INSECURE:-}" != 1 ] || printf 'UF_INSECURE=1\n'`) {
+		t.Errorf("agent.env must carry UF_INSECURE=1 only when it is set")
+	}
+	if !strings.Contains(installScript, `[ "${UF_INSECURE:-}" != 1 ] || insecure="UF_INSECURE=1"`) ||
+		!strings.Contains(installScript, "$insecure nohup") {
+		t.Errorf("the init.d start line must carry UF_INSECURE=1 only when it is set")
 	}
 }
