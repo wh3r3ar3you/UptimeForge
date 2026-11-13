@@ -78,7 +78,7 @@ export function countWord(lang: Lang, n: number, forms: string): string {
 export const common = {
   ru: {
     ok: 'Работает', partial: 'Частично', blocked: 'Блок', down: 'Не работает', unknown: 'Нет данных', paused: 'На паузе',
-    probe_offline: 'Проба офлайн', probe_no_net: 'Нет интернета', host: 'Порог метрики', users_drop: 'Ушли пользователи', node_down: 'Нода не на связи с панелью',
+    probe_offline: 'Проба офлайн', probe_no_net: 'Нет интернета', host: 'Порог метрики', users_drop: 'Ушли пользователи', node_down: 'Нода не на связи с панелью', agent_update: 'Агенты не вернулись после обновления',
     critical: 'Критично', warning: 'Предупреждение',
     online: 'Онлайн', offline: 'Офлайн',
     save: 'Сохранить', cancel: 'Отмена', delete: 'Удалить', edit: 'Изменить', add: 'Добавить', close: 'Закрыть',
@@ -92,7 +92,7 @@ export const common = {
   },
   en: {
     ok: 'Up', partial: 'Partial', blocked: 'Blocked', down: 'Down', unknown: 'No data', paused: 'Paused',
-    probe_offline: 'Probe offline', probe_no_net: 'No internet', host: 'Metric threshold', users_drop: 'Users gone', node_down: 'Node lost by the panel',
+    probe_offline: 'Probe offline', probe_no_net: 'No internet', host: 'Metric threshold', users_drop: 'Users gone', node_down: 'Node lost by the panel', agent_update: 'Agents did not come back after the update',
     critical: 'Critical', warning: 'Warning',
     online: 'Online', offline: 'Offline',
     save: 'Save', cancel: 'Cancel', delete: 'Delete', edit: 'Edit', add: 'Add', close: 'Close',

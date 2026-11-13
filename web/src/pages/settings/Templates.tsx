@@ -17,7 +17,7 @@ const L = {
     rich: 'Карточка (rich-разметка Telegram): h3, p, b, i, code, pre, blockquote, table, details, footer.', html: 'Ответ (HTML Telegram): b, i, u, s, code, pre, a, blockquote.',
     invalid: 'Telegram такое не примет', default_note: 'Сейчас стандартный шаблон. Измените текст, чтобы сделать свой.',
     s_node_down: 'Нода не на связи', s_users_drop: 'Ушли пользователи', s_blocked: 'Блок в регионе', s_down: 'Не работает', s_partial: 'Частично', s_host: 'Порог ЦП',
-    s_probe_offline: 'Агент офлайн', s_subscription: 'Подписка',
+    s_probe_offline: 'Агент офлайн', s_subscription: 'Подписка', s_agent_update: 'Агенты не вернулись после обновления',
   },
   en: {
     title: 'Notification templates', subtitle: 'Your own text for each kind of message. Empty means the default.',
@@ -28,7 +28,7 @@ const L = {
     rich: 'Card (Telegram rich markup): h3, p, b, i, code, pre, blockquote, table, details, footer.', html: 'Reply (Telegram HTML): b, i, u, s, code, pre, a, blockquote.',
     invalid: 'Telegram would refuse this', default_note: 'This is the default. Edit the text to make it your own.',
     s_node_down: 'Node down', s_users_drop: 'Users gone', s_blocked: 'Blocked in a region', s_down: 'Down', s_partial: 'Partial', s_host: 'CPU threshold',
-    s_probe_offline: 'Agent offline', s_subscription: 'Subscription',
+    s_probe_offline: 'Agent offline', s_subscription: 'Subscription', s_agent_update: 'Agents did not come back after the update',
   },
 };
 

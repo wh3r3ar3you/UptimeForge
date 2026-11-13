@@ -25,6 +25,7 @@ const L = {
     why_users_mass: 'Онлайн упал сразу на большинстве нод: похоже на сбой панели или сети, а не на блок одной ноды.',
     why_node_down: 'Панель не достаёт до ноды: сервер лежит, перезагружается или потерял сеть.',
     why_node_mass: 'Панель потеряла большинство нод сразу: похоже на сбой самой панели или её сети.',
+    why_agent_update: 'Раскатка остановлена: другим агентам новая версия не уйдёт, пока её не продолжат вручную. Проверьте эти серверы — агент не запустился на новой версии или запускатель откатил обновление.',
     why_host_cpu: 'Процессор занят почти полностью: проверьте, что его грузит.',
     why_host_mem: 'Когда память кончится, ядро начнёт убивать процессы.',
     why_host_disk: 'На полном диске перестают писаться логи и базы.',
@@ -50,6 +51,7 @@ const L = {
     why_users_mass: 'Users dropped on most nodes at once: looks like a panel or network failure, not one banned node.',
     why_node_down: 'The panel cannot reach the node: the server is down, rebooting or off the network.',
     why_node_mass: 'The panel lost most nodes at once: looks like a failure of the panel itself or its network.',
+    why_agent_update: 'The rollout is halted: no other agent gets the new version until someone resumes it. Look at these servers: the agent did not start on the new version, or the launcher rolled the update back.',
     why_host_cpu: 'The CPU is nearly saturated: see what loads it.',
     why_host_mem: 'When memory runs out, the kernel starts killing processes.',
     why_host_disk: 'On a full disk logs and databases stop writing.',
@@ -72,6 +74,7 @@ interface Failure { ok: boolean; reason?: string; bytes?: number }
 export function useWhy() {
   const t = useT(L);
   return (kind: Kind | string, lines: Failure[], opts: { region?: string; type?: string; note?: string; connected?: boolean } = {}) => {
+    if (kind === 'agent_update') return t('why_agent_update');
     if (kind === 'node_down') return opts.note === 'mass' ? t('why_node_mass') : t('why_node_down');
     if (kind === 'users_drop' || opts.type === 'users') {
       return opts.note === 'mass' ? t('why_users_mass') : opts.connected === false ? t('why_users_gone') : t('why_users_drop');

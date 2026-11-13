@@ -728,3 +728,27 @@ func TestAppLabelsAgentNetwork(t *testing.T) {
 		t.Fatal("the probe is gone after a restart")
 	}
 }
+
+// agent_update in config.yaml holds: the running hub follows it, and the UI
+// cannot switch it back on.
+func TestConfigFileAgentUpdateHolds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte("agent_update: off\n"), 0o600)
+	a := newApp(t, Options{DatabaseURL: pgtest.URL(t), DataDir: dir, ConfigPath: path})
+	defer a.Store.Close()
+	if got := a.Hub.Config().AgentUpdate; got != hub.AgentUpdateOff {
+		t.Fatalf("running agent_update = %q, want off", got)
+	}
+	st := a.Settings()
+	if !st.Managed[SectionGeneral] {
+		t.Fatal("agent_update from config.yaml does not pin the general section")
+	}
+	st.Config.AgentUpdate = hub.AgentUpdateAll
+	if err := a.SaveSettings(context.Background(), st.Config); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.Hub.Config().AgentUpdate; got != hub.AgentUpdateOff {
+		t.Fatalf("after a UI save agent_update = %q, want off", got)
+	}
+}

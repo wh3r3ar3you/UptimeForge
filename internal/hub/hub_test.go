@@ -3921,7 +3921,7 @@ func TestRolloutHaltsOnMissingAgent(t *testing.T) {
 	r.tick()
 	r.expectSent() // halted: nobody else gets it
 
-	r.h.ResumeRollout()
+	r.h.ResumeRollout("leo")
 	st := r.h.Rollout()
 	if st.Halted || len(st.Failed) != 1 || st.Failed[0].Probe != "a01" || st.Failed[0].Error == "" || len(st.InFlight) != 1 {
 		t.Fatalf("after resume %+v", st)
@@ -3966,7 +3966,7 @@ func TestRolloutStragglerBackClosesIncident(t *testing.T) {
 	if st := r.h.Rollout(); !st.Halted || st.Updated != 1 || len(st.InFlight) != 0 {
 		t.Fatalf("status %+v", st)
 	}
-	r.h.ResumeRollout()
+	r.h.ResumeRollout("leo")
 	r.expectSent("a02", "a03") // a01 proved the version: on to 10%
 }
 
@@ -4248,6 +4248,259 @@ func TestRolloutHaltStopsOpenRollout(t *testing.T) {
 	r.connect("a04", "0.1.0", true)
 	r.tick()
 	r.expectSent()
-	r.h.ResumeRollout()
+	r.h.ResumeRollout("leo")
 	r.expectSent("a04")
+}
+
+// The canary came back on the new version and died 30 s later: the next
+// stage must not go out on its 10 minutes, and its absence halts the rollout
+// 10 minutes after it went missing.
+func TestRolloutCanaryDiesDuringSoak(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(30 * time.Second)
+	r.drop("a01")
+	r.advance(10*time.Minute - time.Second)
+	r.tick()
+	r.expectSent() // the canary is gone: no stage 2
+	if st := r.h.Rollout(); st.Halted || st.Stage != 1 {
+		t.Fatalf("halted before 10 minutes missing: %+v", st)
+	}
+	r.advance(time.Second)
+	r.tick()
+	st := r.h.Rollout()
+	if !st.Halted || !slices.Equal(st.InFlight, []string{"a01"}) {
+		t.Fatalf("not halted 10 minutes after the canary went missing: %+v", st)
+	}
+	if ev := r.rec.find(model.EventOpen, rolloutKey); ev == nil || ev.Incident.Lines[0].Reason != "update_missing" {
+		t.Fatalf("incident %+v", ev)
+	}
+	r.expectSent()
+}
+
+// The canary reported the new version, then came back on its old one: that
+// is a rollback. It halts at once and is never sent the version again.
+func TestRolloutCanaryBackOnOldHalts(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(time.Minute)
+	r.drop("a01")
+	r.connect("a01", "0.1.0", true)
+	r.expectSent() // not the same version again
+	ev := r.rec.find(model.EventOpen, rolloutKey)
+	if ev == nil || len(ev.Incident.Lines) != 1 || ev.Incident.Lines[0].Reason != "update_rolled_back" {
+		t.Fatalf("a rolled-back canary raised %+v", ev)
+	}
+	r.advance(10 * time.Minute)
+	r.tick()
+	r.expectSent()
+	r.h.ResumeRollout("leo")
+	r.expectSent("a02") // stage 1 again, never a01
+	r.advance(time.Hour)
+	r.tick()
+	r.expectSent()
+}
+
+// A member that comes and goes during the soak runs the 10 minutes again
+// from its return.
+func TestRolloutSoakRestartsOnFlap(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(5 * time.Minute)
+	r.drop("a01")
+	r.advance(time.Minute)
+	r.connect("a01", rollTarget, true)
+	r.advance(5 * time.Minute)
+	r.tick()
+	r.expectSent() // 11 minutes since the first return, 5 since the last
+	r.advance(5 * time.Minute)
+	r.tick()
+	r.expectSent("a02", "a03")
+}
+
+// An agent told to update that turns up on a dev build or a newer release
+// was taken over by someone: it leaves the rollout, it did not roll back.
+func TestRolloutAgentLeavesForOtherVersion(t *testing.T) {
+	for _, v := range []string{"dev", "0.3.0"} {
+		r := newRollRig(t, rolloutCfg(t, 20, nil))
+		for _, id := range ids(1, 20) {
+			r.connect(id, "0.1.0", true)
+		}
+		r.start()
+		r.expectSent("a01")
+		r.drop("a01")
+		r.connect("a01", v, true)
+		r.expectSent("a02") // a01 proved nothing: stage 1 again with the next one
+		r.restart("a02")
+		r.advance(time.Hour)
+		r.tick()
+		r.sent()
+		if st := r.h.Rollout(); st.Halted || slices.Contains(st.InFlight, "a01") || r.rec.find(model.EventOpen, rolloutKey) != nil {
+			t.Fatalf("%s: %+v", v, st)
+		}
+	}
+}
+
+// Closing the incident says why: resumed by someone, or updates stopped.
+func TestRolloutIncidentClosedWithReason(t *testing.T) {
+	r := haltedRig(t, nil)
+	r.h.ResumeRollout("leo")
+	ev := r.rec.find(model.EventResolve, rolloutKey)
+	if ev == nil || ev.Incident.ResolvedBy != "leo" || ev.Incident.Note != "resumed" {
+		t.Fatalf("resume closed %+v", ev)
+	}
+
+	r = haltedRig(t, nil)
+	if err := r.h.Apply(rolloutCfg(t, 20, func(c *Config) { c.AgentUpdate = AgentUpdateOff })); err != nil {
+		t.Fatal(err)
+	}
+	r.tick()
+	if ev := r.rec.find(model.EventResolve, rolloutKey); ev == nil || ev.Incident.Note != "update_stopped" {
+		t.Fatalf("off closed %+v", ev)
+	}
+
+	r = haltedRig(t, nil)
+	r.h.mu.Lock()
+	r.h.version = "dev"
+	r.h.mu.Unlock()
+	r.tick()
+	if ev := r.rec.find(model.EventResolve, rolloutKey); ev == nil || ev.Incident.Note != "update_stopped" {
+		t.Fatalf("dev hub closed %+v", ev)
+	}
+
+	r = haltedRig(t, nil)
+	if err := r.h.Apply(rolloutCfg(t, 20, func(c *Config) { c.Probes = c.Probes[1:] })); err != nil {
+		t.Fatal(err)
+	}
+	r.tick()
+	if ev := r.rec.find(model.EventResolve, rolloutKey); ev == nil || ev.Incident.Note != "removed" {
+		t.Fatalf("deleted straggler closed %+v", ev)
+	}
+}
+
+// Once every agent in scope is on the new version the rollout says it is
+// done, whatever stage it got to.
+func TestRolloutDone(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 3, nil))
+	r.connect("a01", "0.1.0", true)
+	r.connect("a02", rollTarget, true)
+	r.connect("a03", "0.1.0", false)
+	r.start()
+	r.expectSent("a01")
+	if r.h.Rollout().Done {
+		t.Fatal("done while a01 is updating")
+	}
+	r.restart("a01")
+	r.tick()
+	if r.h.Rollout().Done {
+		t.Fatal("done before a01 ran on the new version")
+	}
+	r.advance(rolloutSoak)
+	r.tick()
+	if st := r.h.Rollout(); !st.Done || st.Stage != 1 || st.Updated != 2 || !slices.Equal(st.NeedReinstall, []string{"a03"}) {
+		t.Fatalf("status %+v", st)
+	}
+	// Stage 1 proved the version: an old agent turning up later is stage 2.
+	r.connect("a03", "0.1.0", true)
+	r.expectSent("a03")
+	if st := r.h.Rollout(); st.Done || st.Stage != 2 {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+// An agent that ran the new version through its soak is no longer the
+// rollout's business: switching it off later is no update incident.
+func TestRolloutProvenAgentOfflineIsQuiet(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 3, nil))
+	for _, id := range ids(1, 3) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02")
+	r.restart("a02")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a03")
+	r.restart("a03")
+	r.advance(rolloutSoak)
+	r.tick()
+	for _, id := range ids(1, 3) {
+		r.drop(id)
+	}
+	r.advance(time.Hour)
+	r.tick()
+	if st := r.h.Rollout(); st.Halted || r.rec.find(model.EventOpen, rolloutKey) != nil {
+		t.Fatalf("agents switched off after proving the version halted the rollout: %+v", st)
+	}
+}
+
+// An agent is told a version once per hub run: one that proved it and later
+// turns up on its old version is not told again.
+func TestRolloutNeverResends(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02", "a03")
+	r.drop("a01")
+	r.connect("a01", "0.1.0", true)
+	r.restart("a02", "a03")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent(ids(4, 20)...)
+	r.connect("a01", "0.1.0", true)
+	r.tick()
+	r.expectSent()
+}
+
+// Closing the halt by hand silences it until the stragglers are dealt with,
+// not forever: a later halt alerts again.
+func TestRolloutClosedByHandAlertsOnNextHalt(t *testing.T) {
+	r := haltedRig(t, nil)
+	inc := r.rec.find(model.EventOpen, rolloutKey).Incident
+	if err := r.h.Resolve(inc.ID, "leo"); err != nil {
+		t.Fatal(err)
+	}
+	r.tick()
+	if len(r.h.Snapshot().Incidents) != 0 {
+		t.Fatal("the incident closed by hand reopened")
+	}
+	r.h.ResumeRollout("leo")
+	r.expectSent("a02")
+	r.drop("a02")
+	r.advance(updateWait)
+	r.tick()
+	n := 0
+	for _, ev := range r.rec.events {
+		if ev.Type == model.EventOpen && ev.Incident.Key == rolloutKey {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("a new halt after a manual close raised %d alerts in all, want 2", n)
+	}
 }

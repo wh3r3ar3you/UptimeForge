@@ -73,6 +73,9 @@ func (f *Formatter) RichIncident(inc *model.Incident, now time.Time) string {
 // resolvedTitle: a recovery is "recovered"; a manual close only says it was
 // closed, since the thing may still be broken.
 func (f *Formatter) resolvedTitle(inc *model.Incident) (emoji, title string) {
+	if inc.Type == "update" && inc.Note == "update_stopped" {
+		return "⏹", f.t("update_closed")
+	}
 	if inc.ResolvedBy != "" {
 		return "☑️", f.t("closed")
 	}
@@ -87,6 +90,8 @@ func (f *Formatter) resolvedLines(inc *model.Incident) []string {
 	}
 	if inc.Note == "removed" {
 		switch inc.Type {
+		case "update":
+			lines = append(lines, f.t("update_removed"))
 		case "users":
 			lines = append(lines, f.t("users_removed"))
 		case "host":
@@ -107,12 +112,17 @@ func (f *Formatter) resolvedLines(inc *model.Incident) []string {
 		lines = append(lines, f.t("was", was, esc(f.Duration(inc.Resolved.Sub(inc.Started)))))
 	case inc.Type == "users" && inc.Drop != nil:
 		lines = append(lines, f.t("was", was, f.t("users_low", groupDigits(inc.Drop.Low), groupDigits(inc.Drop.Before))))
-	case inc.Type != "probe" && inc.Type != "subscription" && inc.Type != "host" && inc.Type != "users":
+	case inc.Type != "probe" && inc.Type != "subscription" && inc.Type != "host" && inc.Type != "users" && inc.Type != "update":
 		lines = append(lines, f.t("was", was, f.t("probes_failing", inc.PeakFailing, inc.PeakTotal)))
 	default:
 		lines = append(lines, f.t("was", was, esc(f.Duration(inc.Resolved.Sub(inc.Started)))))
 	}
-	if inc.ResolvedBy != "" {
+	switch {
+	case inc.Type == "update" && inc.Note == "resumed":
+		lines = append(lines, f.t("update_resumed", esc(inc.ResolvedBy)))
+	case inc.Type == "update" && inc.Note == "update_stopped":
+		lines = append(lines, f.t("update_stopped"))
+	case inc.ResolvedBy != "":
 		lines = append(lines, f.t("closed_by", esc(inc.ResolvedBy)))
 	}
 	if inc.AckBy != "" {

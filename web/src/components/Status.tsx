@@ -1,6 +1,6 @@
 import { Badge, Box, Group, Text, ThemeIcon, Tooltip } from '@mantine/core';
 import {
-  IconBan, IconCircleCheck, IconGauge, IconTrendingDown, IconCircleX, IconHelpCircle, IconPlayerPause, IconPlugConnectedX, IconAlertTriangle, IconWorldOff, IconServerOff,
+  IconBan, IconCircleCheck, IconGauge, IconTrendingDown, IconCircleX, IconHelpCircle, IconPlayerPause, IconPlugConnectedX, IconAlertTriangle, IconWorldOff, IconServerOff, IconRefreshAlert,
 } from '@tabler/icons-react';
 import type { Kind } from '../api';
 import { useCommon } from '../i18n';
@@ -12,14 +12,14 @@ export function kindColor(k?: Kind | string): string {
     case 'partial': return status.partial;
     case 'blocked': return status.blocked;
     case 'down': case 'users_drop': case 'node_down': return status.down;
-    case 'probe_offline': case 'probe_no_net': case 'host': return status.partial;
+    case 'probe_offline': case 'probe_no_net': case 'host': case 'agent_update': return status.partial;
     default: return status.unknown;
   }
 }
 
 const icons: Record<string, typeof IconCircleCheck> = {
   ok: IconCircleCheck, partial: IconAlertTriangle, blocked: IconBan, down: IconCircleX,
-  unknown: IconHelpCircle, paused: IconPlayerPause, probe_offline: IconPlugConnectedX, probe_no_net: IconWorldOff, host: IconGauge, users_drop: IconTrendingDown, node_down: IconServerOff,
+  unknown: IconHelpCircle, paused: IconPlayerPause, probe_offline: IconPlugConnectedX, probe_no_net: IconWorldOff, host: IconGauge, users_drop: IconTrendingDown, node_down: IconServerOff, agent_update: IconRefreshAlert,
 };
 
 export function KindIcon({ kind, size = 16 }: { kind?: Kind | string; size?: number }) {

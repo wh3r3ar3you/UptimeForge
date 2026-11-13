@@ -69,6 +69,7 @@ function incidentLink(key: string) {
   if (key.startsWith('probe:') || key.startsWith('probe-net:')) return `/probes/${enc(key.slice(key.indexOf(':') + 1))}`;
   if (key.startsWith('host:')) return `/probes/${enc(key.split(':')[1])}`;
   if (key.startsWith('rw:')) return '/remnawave';
+  if (key.startsWith('update:')) return '/incidents';
   if (key.startsWith('sub:')) return `/checks/${enc(key.slice(4))}`;
   return `/checks/${enc(key)}`;
 }

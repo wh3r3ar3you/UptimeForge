@@ -42,7 +42,15 @@ var texts = map[string]dict{
 		"why_node_down":   "Панель не достаёт до ноды: сервер лежит, перезагружается или потерял сеть.",
 		"why_node_down_n": "Панель не достаёт до ноды: сервер лежит, перезагружается или потерял сеть. До этого на ней было %s онлайн.",
 		"why_node_mass":   "Панель потеряла большинство нод сразу: похоже на сбой самой панели или её сети.",
-		"affected":        "Затронуто проверок: %d — %s", "affected_more": "и ещё %d",
+		"agent_update":    "Агенты не вернулись после обновления",
+		"why_agent_update": "Раскатка остановлена: другим агентам новая версия не уйдёт, пока её не продолжат вручную. " +
+			"Проверьте эти серверы — агент не запустился на новой версии или запускатель откатил обновление.",
+		"r_update_missing": "не вернулся на новую версию", "r_update_rolled_back": "обновление откатилось",
+		"update_resumed": "▶️ Раскатку продолжил %s: эти агенты новую версию больше не получат",
+		"update_stopped": "⏹ Раскатка прекращена: обновление агентов выключено или у хаба другая версия",
+		"update_closed":  "Раскатка прекращена", "update_removed": "🗑 Агент удалён",
+		"reply_update_stopped": "⏹ Раскатка прекращена: <b>%s</b>",
+		"affected":             "Затронуто проверок: %d — %s", "affected_more": "и ещё %d",
 		"report_title": "Неделя мониторинга", "report_uptime": "Аптайм проверок: <b>%s</b>", "report_worst": "Дольше всех лежали",
 		"report_nodes": "Ноды и серверы без связи", "report_bans": "Блокировки (ушли пользователи)",
 		"report_incidents": "Инцидентов: открыто <b>%d</b>, закрыто <b>%d</b>, вручную %d", "report_mttr": "в среднем до восстановления %s",
@@ -114,7 +122,15 @@ var texts = map[string]dict{
 		"why_node_down":   "The panel cannot reach the node: the server is down, rebooting or off the network.",
 		"why_node_down_n": "The panel cannot reach the node: the server is down, rebooting or off the network. It had %s users online.",
 		"why_node_mass":   "The panel lost most nodes at once: looks like a failure of the panel itself or its network.",
-		"affected":        "Checks affected: %d — %s", "affected_more": "and %d more",
+		"agent_update":    "Agents did not come back after the update",
+		"why_agent_update": "The rollout is halted: no other agent gets the new version until someone resumes it. " +
+			"Look at these servers: the agent did not start on the new version, or the launcher rolled the update back.",
+		"r_update_missing": "not back on the new version", "r_update_rolled_back": "update rolled back",
+		"update_resumed": "▶️ Rollout resumed by %s: these agents will not get the new version again",
+		"update_stopped": "⏹ Rollout stopped: agent updates were switched off or the hub runs another version",
+		"update_closed":  "Rollout stopped", "update_removed": "🗑 Agent deleted",
+		"reply_update_stopped": "⏹ Rollout stopped: <b>%s</b>",
+		"affected":             "Checks affected: %d — %s", "affected_more": "and %d more",
 		"report_title": "Monitoring week", "report_uptime": "Checks uptime: <b>%s</b>", "report_worst": "Down the longest",
 		"report_nodes": "Nodes and servers lost", "report_bans": "Bans (users gone)",
 		"report_incidents": "Incidents: <b>%d</b> opened, <b>%d</b> closed, %d by hand", "report_mttr": "%s to recover on average",
@@ -204,6 +220,9 @@ func kindEmoji(inc *model.Incident, k model.Kind) string {
 	}
 	if k == model.KindNodeDown {
 		return "🔌"
+	}
+	if k == model.KindAgentUpdate {
+		return "⚠️"
 	}
 	switch k {
 	case model.KindDown:
@@ -351,6 +370,8 @@ func (f *Formatter) why(inc *model.Incident) string {
 		return f.t("why_offline")
 	case inc.Kind == model.KindProbeNoNet:
 		return f.t("why_no_net")
+	case inc.Kind == model.KindAgentUpdate:
+		return f.t("why_agent_update")
 	case inc.Kind == model.KindNodeDown:
 		switch {
 		case inc.Note == "mass":
@@ -489,6 +510,9 @@ func (f *Formatter) Resolved(inc *model.Incident) string {
 }
 
 func (f *Formatter) ResolvedReply(inc *model.Incident) string {
+	if inc.Type == "update" && inc.Note == "update_stopped" {
+		return f.t("reply_update_stopped", esc(inc.Name))
+	}
 	if inc.ResolvedBy != "" {
 		return f.t("reply_closed", esc(inc.Name), esc(inc.ResolvedBy))
 	}
@@ -581,6 +605,8 @@ func (f *Formatter) Link(inc *model.Incident) string {
 		return base + "/checks"
 	case strings.HasPrefix(inc.Key, "rw:"):
 		return base + "/remnawave"
+	case strings.HasPrefix(inc.Key, "update:"):
+		return base + "/incidents"
 	}
 	return base + "/checks/" + url.PathEscape(inc.Key)
 }

@@ -10,7 +10,7 @@ import (
 )
 
 // SampleNames are the samples' keys, in the editor's order.
-var SampleNames = []string{"node_down", "users_drop", "blocked", "down", "partial", "host", "probe_offline", "subscription"}
+var SampleNames = []string{"node_down", "users_drop", "blocked", "down", "partial", "host", "probe_offline", "subscription", "agent_update"}
 
 // Samples are one incident of every kind the hub raises, for the template
 // editor's preview and to check a template before it is saved.
@@ -38,12 +38,14 @@ func Samples(now time.Time) map[string]*model.Incident {
 			Lines: []model.ProbeLine{{Probe: "p", Name: "Дом · Москва", Region: "ru", Reason: "offline"}}, Started: start, Note: start.Format(time.RFC3339)},
 		"subscription": {Key: "sub:canary", Name: "Подписка", Type: "subscription", Kind: model.KindDown, Worst: model.KindDown, Severity: model.Critical,
 			Lines: []model.ProbeLine{{Name: "hub", Error: "HTTP 502"}}, Started: start},
+		"agent_update": {Key: "update:agents", Name: "uptimeforge-agent 0.2.0", Type: "update", Kind: model.KindAgentUpdate, Worst: model.KindAgentUpdate,
+			Severity: model.Warning, Lines: []model.ProbeLine{{Probe: "p", Name: "Дом · Москва", Region: "ru", Reason: "update_rolled_back"}}, Started: start},
 	}
 }
 
 // templateKinds are the kinds a card template can be set for on its own.
 var templateKinds = []model.Kind{model.KindDown, model.KindBlocked, model.KindPartial, model.KindProbeOffline,
-	model.KindProbeNoNet, model.KindHost, model.KindUsersDrop, model.KindNodeDown}
+	model.KindProbeNoNet, model.KindHost, model.KindUsersDrop, model.KindNodeDown, model.KindAgentUpdate}
 
 // SplitTemplateKey reads "card.down" as the base key and the kind.
 func SplitTemplateKey(k TemplateKey) (TemplateKey, model.Kind, error) {

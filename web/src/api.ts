@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 
 // ---- Types mirroring the hub's JSON ----
 
-export type Kind = 'ok' | 'unknown' | 'partial' | 'blocked' | 'down' | 'probe_offline' | 'probe_no_net' | 'host' | 'users_drop' | 'node_down' | 'paused';
+export type Kind = 'ok' | 'unknown' | 'partial' | 'blocked' | 'down' | 'probe_offline' | 'probe_no_net' | 'host' | 'users_drop' | 'node_down' | 'agent_update' | 'paused';
 export type Severity = 'critical' | 'warning' | 'info';
 
 export interface ProbeLine {

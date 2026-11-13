@@ -144,7 +144,7 @@ func (a *App) markManaged() {
 	}
 	set := map[string]bool{
 		SectionGeneral: f.Timezone != "" || f.Lang != "" || f.RegionLabel != "" || f.OfflineGrace != 0 ||
-			f.Defaults != (hub.Defaults{}) || f.Baseline != nil || f.PublicURL != "",
+			f.Defaults != (hub.Defaults{}) || f.Baseline != nil || f.PublicURL != "" || f.AgentUpdate != "",
 		SectionAlerts:    f.Alerts.QuietHours != "" || f.Alerts.RemindEvery != nil || f.Alerts.Host != nil,
 		SectionHeartbeat: f.Heartbeat.URL != "",
 		SectionTelegram:  f.Telegram != nil,
@@ -218,6 +218,9 @@ func (a *App) compose(ctx context.Context, ov *override) (*hub.Config, error) {
 			}
 			if f.PublicURL != "" {
 				c.PublicURL = f.PublicURL
+			}
+			if f.AgentUpdate != "" {
+				c.AgentUpdate = f.AgentUpdate
 			}
 		}
 		if a.managed.sections[SectionAlerts] {

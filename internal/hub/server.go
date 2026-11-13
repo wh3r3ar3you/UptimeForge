@@ -239,6 +239,7 @@ func (h *Hub) attach(p *probe, ac *agentConn, hello proto.Hello, tokenHash strin
 	if len(p.watchers) > 0 {
 		h.renewLive(p) // someone is already watching: no need to wait for the next renewal
 	}
+	h.rolloutAttached(p.cfg.ID)
 	h.rolloutStep(h.now()) // back from an update, or due for one
 	return true
 }
@@ -252,6 +253,7 @@ func (h *Hub) detach(p *probe, ac *agentConn) {
 	now := time.Now()
 	p.conn, p.online, p.since = nil, false, now
 	h.evaluateAll(now)
+	h.rolloutStep(h.now()) // an agent told to update is missing from now
 }
 
 // Status is the read model for the API and, later, the web UI.
