@@ -49,7 +49,7 @@ func snapshotIncidents(now time.Time) map[string]*model.Incident {
 func TestSnapshotCurrentFormatter(t *testing.T) {
 	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
 	for _, lang := range []string{"ru", "en"} {
-		f := &Formatter{Lang: lang, Loc: time.UTC, PublicURL: "https://hub.example.com"}
+		f := &Formatter{Lang: lang, Loc: time.UTC, PublicURL: "https://hub.example.com", Now: func() time.Time { return now }}
 		for name, inc := range snapshotIncidents(now) {
 			r := *inc
 			r.Resolved = now

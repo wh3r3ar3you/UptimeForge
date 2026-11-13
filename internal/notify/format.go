@@ -24,6 +24,8 @@ type Formatter struct {
 	// to render (its default went out instead).
 	Custom  Templates
 	OnError func(error)
+	// Now is the formatter's clock (nil = time.Now); tests pin it.
+	Now func() time.Time
 }
 
 type dict map[string]string
@@ -290,7 +292,11 @@ func (f *Formatter) Duration(d time.Duration) string {
 
 func (f *Formatter) clock(t time.Time) string {
 	t = t.In(f.Loc)
-	if time.Since(t) > 20*time.Hour {
+	now := time.Now
+	if f.Now != nil {
+		now = f.Now
+	}
+	if now().Sub(t) > 20*time.Hour {
 		return t.Format("02.01 15:04")
 	}
 	return t.Format("15:04")
