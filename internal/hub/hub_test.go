@@ -2734,3 +2734,110 @@ func TestCheckerAssignHasNoMetrics(t *testing.T) {
 		t.Fatalf("server assign metrics = %v, want nil", *m)
 	}
 }
+
+// sysRecorder counts the host snapshots that reach storage.
+type sysRecorder struct {
+	memRecorder
+	mu2 sync.Mutex
+	n   int
+}
+
+func (r *sysRecorder) System(string, proto.Metrics) {
+	r.mu2.Lock()
+	r.n++
+	r.mu2.Unlock()
+}
+
+func (r *sysRecorder) systems() int {
+	r.mu2.Lock()
+	defer r.mu2.Unlock()
+	return r.n
+}
+
+// A checker is a volunteer's machine: it goes away when its owner turns it
+// off, and that is no incident. The same silence of a server agent is.
+func TestCheckerOfflineIsQuiet(t *testing.T) {
+	h := checkerHub(t, false)
+	rec := &recorder{}
+	h.AddNotifier(rec)
+	h.mu.Lock()
+	for _, id := range []string{"chk", "srv"} {
+		p := h.probes[id]
+		p.hello.Version = "test"
+		p.online = false
+		p.since = time.Now().Add(-48 * time.Hour)
+	}
+	h.mu.Unlock()
+	h.tick()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.incidents["probe:chk"] != nil {
+		t.Fatalf("a checker going offline raised an incident: %+v", h.incidents["probe:chk"])
+	}
+	if h.incidents["probe:srv"] == nil {
+		t.Fatal("a server agent going offline must still raise probe_offline")
+	}
+}
+
+// A checker behind a dead home connection is no alert either, and its rows
+// still drop out of the verdicts.
+func TestCheckerWithoutInternetIsQuiet(t *testing.T) {
+	probe := func(role string) ProbeConfig {
+		return ProbeConfig{ID: "p-" + role, Token: "token-" + role + "-0123456789", Role: role, Probing: role != RoleChecker,
+			Baseline: []checks.Spec{{Type: "tcp", TCP: &checks.TCPParams{Address: "10.0.0.2:443"}}}}
+	}
+	cfg := &Config{DataDir: t.TempDir(), Baseline: []checks.Spec{},
+		Probes: []ProbeConfig{probe(RoleChecker), probe(RoleServer)},
+		Checks: []CheckConfig{
+			{Spec: checks.Spec{ID: "node", Type: "tcp", TCP: &checks.TCPParams{Address: "10.0.0.1:443"}}, Probes: []string{"id=p-checker", "id=p-server"}},
+		}}
+	h, err := New(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{}
+	h.AddNotifier(rec)
+	h.mu.Lock()
+	for _, p := range h.probes {
+		p.online = true
+		p.since = time.Now().Add(-time.Hour)
+	}
+	h.rebuild()
+	h.mu.Unlock()
+
+	for range 3 {
+		for _, id := range []string{"p-checker", "p-server"} {
+			h.Ingest(id, []checks.Result{res("_baseline/"+id+"/0", false), res("node", false)})
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.probes["p-server"].noNet || h.incidents["probe-net:p-server"] == nil {
+		t.Fatal("a server agent without internet must still raise probe-net")
+	}
+	if c := h.probes["p-checker"]; !c.noNet {
+		t.Fatal("the checker's lost internet must still keep its rows out of verdicts")
+	}
+	if h.incidents["probe-net:p-checker"] != nil {
+		t.Fatalf("a checker without internet raised an incident: %+v", h.incidents["probe-net:p-checker"])
+	}
+}
+
+func TestCheckerMetricsDropped(t *testing.T) {
+	h := checkerHub(t, false)
+	rec := &sysRecorder{}
+	h.SetRecorder(rec)
+	h.IngestMetrics("chk", cpuAt(99))
+	h.mu.Lock()
+	if h.probes["chk"].metrics != nil || len(h.probes["chk"].host) != 0 {
+		t.Fatal("a checker's host metrics were kept or fed to host alerts")
+	}
+	h.mu.Unlock()
+	if n := rec.systems(); n != 0 {
+		t.Fatalf("recorder got %d points from a checker", n)
+	}
+	h.IngestMetrics("srv", cpuAt(5))
+	if n := rec.systems(); n != 1 {
+		t.Fatalf("a server agent's metrics must be stored, recorder got %d", n)
+	}
+}

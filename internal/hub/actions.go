@@ -125,8 +125,8 @@ func (h *Hub) IngestMetrics(probeID string, m proto.Metrics) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := h.probes[probeID]
-	if p == nil {
-		return
+	if p == nil || p.cfg.Checker() {
+		return // a checker is someone else's machine: its host is none of our business
 	}
 	at, ok := measuredAt(time.Now(), m.Age)
 	if !ok || at.Before(p.metricsAt) {

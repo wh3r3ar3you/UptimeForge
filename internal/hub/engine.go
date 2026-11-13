@@ -342,6 +342,11 @@ func (h *Hub) updateProbeHealth(p *probe, now time.Time) bool {
 		return false
 	}
 	p.noNet = noNet
+	if p.cfg.Checker() {
+		// Its rows stay out of verdicts (noNet), but a volunteer's home
+		// connection is nothing to alert on.
+		return true
+	}
 	kind := model.KindOK
 	if noNet {
 		kind = model.KindProbeNoNet

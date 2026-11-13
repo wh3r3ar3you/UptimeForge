@@ -370,7 +370,8 @@ func (h *Hub) tick() {
 	h.lastTick = now
 	for _, id := range h.probeOrder {
 		p := h.probes[id]
-		if !p.online && now.Sub(p.since) > h.offlineAfter(p) {
+		// A checker is a volunteer's machine: its owner switching it off is no incident.
+		if !p.online && !p.cfg.Checker() && now.Sub(p.since) > h.offlineAfter(p) {
 			note := "never"
 			if p.hello.Version != "" || h.seen[id] {
 				note = p.since.Format(time.RFC3339)
