@@ -102,6 +102,7 @@ type probe struct {
 	stopLive  func()        // ends the renewal loop; nil without watchers
 	liveUntil time.Time     // the host was asked for live points until then
 	storedAt  time.Time     // the last point that went to storage
+	agg       liveAgg       // the points since then
 	liveWake  chan struct{} // wakes the hub's own collector (local probe)
 }
 
@@ -365,6 +366,7 @@ func (h *Hub) Run(ctx context.Context) error {
 			h.mu.Lock()
 			for _, p := range h.probes {
 				h.stopVirtual(p, time.Now())
+				h.closeWatchers(p) // live streams and their renewals end with the hub
 			}
 			for _, w := range h.subWatch {
 				w.cancel()

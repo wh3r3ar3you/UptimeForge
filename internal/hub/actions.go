@@ -122,7 +122,8 @@ func (h *Hub) byID(id string) *model.Incident {
 
 // IngestMetrics takes a host snapshot of a probe: it becomes the probe's
 // latest, goes to its live watchers, and, at the usual rate, to storage and
-// host alerts (see storePoint).
+// host alerts (see storeDue; while live, what is stored is the aggregate of
+// the points since the last stored one).
 func (h *Hub) IngestMetrics(probeID string, m proto.Metrics) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -134,16 +135,24 @@ func (h *Hub) IngestMetrics(probeID string, m proto.Metrics) {
 	if !ok || at.Before(p.metricsAt) {
 		return
 	}
+	prev := p.metricsAt
 	p.metrics, p.metricsAt = &m, at
 	fanOut(p, m)
-	if !storePoint(p, at) {
+	gap := at.Sub(prev)
+	covers := max(gap, time.Millisecond)
+	if prev.IsZero() {
+		gap, covers = localMetricsInt, localMetricsInt
+	}
+	p.agg.add(m, covers.Seconds())
+	if !storeDue(p, at, gap) {
 		return
 	}
-	p.storedAt = at
+	s := p.agg.result()
+	p.agg, p.storedAt = liveAgg{}, at
 	if h.rec != nil {
-		h.rec.System(probeID, m)
+		h.rec.System(probeID, s)
 	}
-	h.evalHost(p, m, at)
+	h.evalHost(p, s, at)
 }
 
 // RunOutcome is one probe's answer to a run-once request.

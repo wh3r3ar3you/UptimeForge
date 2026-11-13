@@ -20,7 +20,11 @@ const (
 	// evaluated by host alerts, so neither the database nor alert timing
 	// sees the live rate. Half a live interval of slack keeps jitter from
 	// pushing a stored point to the next second.
-	liveStoreEvery = 15*time.Second - liveInterval/2
+	liveStoreEvery = localMetricsInt - liveInterval/2
+	// liveSlowGap: a point this long after the previous one is not at the
+	// live rate (an old agent, a lost renewal, an agent back from offline)
+	// and is stored like any other.
+	liveSlowGap = localMetricsInt / 2
 	// liveGrace covers the agent's live window outlasting the hub's view
 	// of it: the command arrives late, so its last live points do too.
 	liveGrace  = 5 * time.Second
@@ -43,7 +47,7 @@ func (h *Hub) Watch(probeID string) (<-chan proto.Metrics, func(), error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := h.probes[probeID]
-	if p == nil || !liveCapable(p.cfg) {
+	if p == nil || !liveCapable(p.cfg) || (h.ctx != nil && h.ctx.Err() != nil) { // or the hub has stopped
 		return nil, nil, ErrNoLive
 	}
 	ch := make(chan proto.Metrics, liveBuffer)
@@ -136,14 +140,72 @@ func fanOut(p *probe, m proto.Metrics) {
 	}
 }
 
-// storePoint says whether a point measured at goes to storage and host
-// alerts. Outside a live window every point does, at whatever rate the
-// agent has; inside one, at most one per liveStoreEvery. Callers hold h.mu.
-func storePoint(p *probe, at time.Time) bool {
-	if at.After(p.liveUntil.Add(liveGrace)) {
-		return true
+// storeDue says whether the points gathered since the last stored one go to
+// storage and host alerts now; at is the newest, gap its distance from the
+// one before. Every point does outside a live window (whatever rate the
+// agent has) and every point not at the live rate does inside one; live
+// points go at most once per liveStoreEvery. Callers hold h.mu.
+func storeDue(p *probe, at time.Time, gap time.Duration) bool {
+	return at.After(p.liveUntil.Add(liveGrace)) || gap >= liveSlowGap || at.Sub(p.storedAt) >= liveStoreEvery
+}
+
+// liveAgg gathers the points received since the last stored one, so what
+// is stored and evaluated while live is what a usual-rate point would have
+// been: rates averaged over the time the points cover, gauges the newest.
+type liveAgg struct {
+	n    int
+	w    float64 // seconds covered by the points
+	extW float64 // of them, by points that carry Ext
+	sum  proto.Metrics
+	ext  proto.HostExt
+	last proto.Metrics
+}
+
+// add takes point m covering w seconds (since the point before it).
+func (a *liveAgg) add(m proto.Metrics, w float64) {
+	a.n++
+	a.w += w
+	a.sum.CPU += m.CPU * w
+	a.sum.RX += m.RX * w
+	a.sum.TX += m.TX * w
+	if e := m.Ext; e != nil {
+		a.extW += w
+		s := &a.ext
+		s.CPUUser += e.CPUUser * w
+		s.CPUSystem += e.CPUSystem * w
+		s.CPUIowait += e.CPUIowait * w
+		s.CPUSteal += e.CPUSteal * w
+		s.CPUIRQ += e.CPUIRQ * w
+		s.DiskRead += e.DiskRead * w
+		s.DiskWrite += e.DiskWrite * w
+		s.DiskROps += e.DiskROps * w
+		s.DiskWOps += e.DiskWOps * w
+		s.DiskUtil += e.DiskUtil * w
+		s.RXPkts += e.RXPkts * w
+		s.TXPkts += e.TXPkts * w
+		s.NetErr += e.NetErr * w
 	}
-	return at.Sub(p.storedAt) >= liveStoreEvery
+	a.last = m
+}
+
+// result is the aggregate point: the newest one with its rate fields
+// replaced by their averages. A single point is returned as it came.
+func (a *liveAgg) result() proto.Metrics {
+	m := a.last
+	if a.n <= 1 || a.w <= 0 {
+		return m
+	}
+	m.CPU, m.RX, m.TX = a.sum.CPU/a.w, a.sum.RX/a.w, a.sum.TX/a.w
+	if m.Ext != nil && a.extW > 0 {
+		e := *m.Ext // a copy: the original went to the watchers
+		s, w := &a.ext, a.extW
+		e.CPUUser, e.CPUSystem, e.CPUIowait = s.CPUUser/w, s.CPUSystem/w, s.CPUIowait/w
+		e.CPUSteal, e.CPUIRQ = s.CPUSteal/w, s.CPUIRQ/w
+		e.DiskRead, e.DiskWrite, e.DiskROps, e.DiskWOps, e.DiskUtil = s.DiskRead/w, s.DiskWrite/w, s.DiskROps/w, s.DiskWOps/w, s.DiskUtil/w
+		e.RXPkts, e.TXPkts, e.NetErr = s.RXPkts/w, s.TXPkts/w, s.NetErr/w
+		m.Ext = &e
+	}
+	return m
 }
 
 // localNext is the wait before the hub's own host is sampled again: the

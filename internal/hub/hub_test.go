@@ -3166,7 +3166,30 @@ type liveRig struct {
 
 func newLiveRig(t *testing.T) *liveRig {
 	t.Helper()
-	r := &liveRig{h: checkerHub(t, false), tick: make(chan time.Time),
+	return newLiveRigWith(t, liveCfg(t, nil))
+}
+
+// liveCfg is checkerHub's config: "chk" a checker, "srv" a server agent;
+// mod changes it.
+func liveCfg(t *testing.T, mod func(*Config)) *Config {
+	cfg := &Config{DataDir: t.TempDir(), Baseline: []checks.Spec{},
+		Probes: []ProbeConfig{
+			{ID: "chk", Token: "token-chk-0123456789", Role: RoleChecker, Labels: map[string]string{"isp": "mts"}},
+			{ID: "srv", Token: "token-srv-0123456789", Probing: true, Labels: map[string]string{"isp": "mts"}},
+		}}
+	if mod != nil {
+		mod(cfg)
+	}
+	return cfg
+}
+
+func newLiveRigWith(t *testing.T, cfg *Config) *liveRig {
+	t.Helper()
+	h, err := New(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &liveRig{h: h, tick: make(chan time.Time),
 		conn: &agentConn{assign: make(chan []byte, 1), out: make(chan []byte, 16), cancel: func() {}}}
 	r.h.liveTicker = func(d time.Duration) (<-chan time.Time, func()) {
 		r.every.Store(int64(d))
@@ -3413,5 +3436,230 @@ func TestWatchRefusesCheckers(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("no live point %d from the hub's own host", i)
 		}
+	}
+}
+
+// valRecorder keeps the host points it is given.
+type valRecorder struct {
+	memRecorder
+	mu2 sync.Mutex
+	ms  []proto.Metrics
+}
+
+func (r *valRecorder) System(_ string, m proto.Metrics) {
+	r.mu2.Lock()
+	r.ms = append(r.ms, m)
+	r.mu2.Unlock()
+}
+
+func (r *valRecorder) points() []proto.Metrics {
+	r.mu2.Lock()
+	defer r.mu2.Unlock()
+	return slices.Clone(r.ms)
+}
+
+// fakeClock makes the rig's hub read time from a clock the test advances.
+func (r *liveRig) fakeClock() (advance func(time.Duration)) {
+	var mu sync.Mutex
+	clock := time.Now()
+	r.h.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	return func(d time.Duration) { mu.Lock(); clock = clock.Add(d); mu.Unlock() }
+}
+
+// feed sends points spaced by the gaps (the first one at once), renewing
+// the live window as the hub would every 10 s while c watches. c may be nil.
+func (r *liveRig) feed(t *testing.T, advance func(time.Duration), c <-chan proto.Metrics, ms []proto.Metrics, gap func(i int) time.Duration) {
+	t.Helper()
+	var sinceRenew time.Duration
+	for i, m := range ms {
+		if i > 0 {
+			advance(gap(i))
+			sinceRenew += gap(i)
+		}
+		if c != nil && sinceRenew >= 10*time.Second {
+			sinceRenew = 0
+			if !r.fire(2 * time.Second) {
+				t.Fatal("no renewal loop")
+			}
+			if _, ok := r.live(t); !ok {
+				t.Fatal("no renewal sent")
+			}
+		}
+		r.h.IngestMetrics("srv", m)
+		if c != nil {
+			select {
+			case <-c:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("point %d not fanned out", i)
+			}
+		}
+	}
+}
+
+func cpuRule(above float64, d time.Duration) func(*Config) {
+	return func(c *Config) {
+		c.Alerts.Host = []HostRule{{Metric: "cpu", Above: above, For: checks.Duration(d)}}
+	}
+}
+
+// Host alerts must not depend on whether someone has the page open: live
+// points that swing 80/100 average to 90, like the 15 s points they replace.
+func TestLiveHostAlertSeesAggregate(t *testing.T) {
+	const key = "host:srv:cpu"
+	opened := func(r *liveRig) bool {
+		r.h.mu.Lock()
+		defer r.h.mu.Unlock()
+		return r.h.incidents[key] != nil
+	}
+
+	plain := newLiveRigWith(t, liveCfg(t, cpuRule(85, 30*time.Second)))
+	adv := plain.fakeClock()
+	plain.feed(t, adv, nil, slices.Repeat([]proto.Metrics{cpuAt(90)}, 6), func(int) time.Duration { return 15 * time.Second })
+	if !opened(plain) {
+		t.Fatal("reference: 75 s of cpu 90 at 15 s points must alert on cpu > 85 for 30s")
+	}
+
+	live := newLiveRigWith(t, liveCfg(t, cpuRule(85, 30*time.Second)))
+	adv = live.fakeClock()
+	c, stop, err := live.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	live.live(t)
+	ms := make([]proto.Metrics, 76)
+	for i := range ms {
+		ms[i] = cpuAt(80 + 20*float64(i%2))
+	}
+	live.feed(t, adv, c, ms, func(int) time.Duration { return time.Second })
+	if !opened(live) {
+		t.Fatal("the same load seen live (80/100 every second) did not alert")
+	}
+}
+
+// What is stored and evaluated while live is the aggregate since the last
+// stored point: rates averaged, gauges the newest. A 1 s spike is no alert.
+func TestLivePointsNeverReachHostAlertsAlone(t *testing.T) {
+	r := newLiveRigWith(t, liveCfg(t, cpuRule(85, 0)))
+	rec := &valRecorder{}
+	r.h.SetRecorder(rec)
+	adv := r.fakeClock()
+	c, stop, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	r.live(t)
+	ms := make([]proto.Metrics, 16)
+	for i := range ms {
+		cpu := 10.0
+		if i == 15 {
+			cpu = 100
+		}
+		ms[i] = cpuAt(cpu)
+		ms[i].MemUsed = uint64(i)
+		ms[i].Ext = &proto.HostExt{CPUSteal: cpu / 10, Procs: i}
+	}
+	r.feed(t, adv, c, ms, func(int) time.Duration { return time.Second })
+
+	r.h.mu.Lock()
+	inc := r.h.incidents["host:srv:cpu"]
+	r.h.mu.Unlock()
+	if inc != nil {
+		t.Fatalf("a single 1 s spike between stored points opened %+v", inc.Host)
+	}
+	got := rec.points()
+	if len(got) != 2 {
+		t.Fatalf("stored %d points, want 2", len(got))
+	}
+	want := (14*10.0 + 100) / 15
+	if a := got[1]; math.Abs(a.CPU-want) > 1e-9 || a.Ext == nil || math.Abs(a.Ext.CPUSteal-want/10) > 1e-9 || a.MemUsed != 15 || a.Ext.Procs != 15 {
+		t.Fatalf("stored %+v ext %+v; want cpu %.3f steal %.3f, newest gauges 15", a, a.Ext, want, want/10)
+	}
+}
+
+// An agent that ignores live (old version, a lost renewal, back from
+// offline) sends at its usual 15 s with jitter: every point is stored.
+func TestLiveOldAgentKeepsEveryPoint(t *testing.T) {
+	r := newLiveRig(t)
+	rec := &sysRecorder{}
+	r.h.SetRecorder(rec)
+	adv := r.fakeClock()
+	c, stop, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	r.live(t)
+	r.feed(t, adv, c, slices.Repeat([]proto.Metrics{cpuAt(5)}, 10), func(i int) time.Duration {
+		return 15*time.Second + time.Duration(1-2*(i%2))*time.Second // 14 s, 16 s, ...
+	})
+	if n := rec.systems(); n != 10 {
+		t.Fatalf("an agent at 15 s ± 1 s had %d of 10 points stored while watched", n)
+	}
+}
+
+// A watched probe that goes away or can no longer be watched ends its
+// streams and its renewals.
+func TestApplyClosesWatchers(t *testing.T) {
+	for name, mod := range map[string]func(*Config){
+		"removed": func(c *Config) { c.Probes = c.Probes[:1] },
+		"checker": func(c *Config) { c.Probes[1].Role, c.Probes[1].Probing = RoleChecker, false },
+		"via":     func(c *Config) { c.Probes[1].Token, c.Probes[1].Via = "", "socks5://127.0.0.1:1080" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newLiveRig(t)
+			c, stop, err := r.h.Watch("srv")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stop()
+			r.live(t)
+			if err := r.h.Apply(liveCfg(t, mod)); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case _, open := <-c:
+				if open {
+					t.Fatal("the stream still delivers")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("the stream was not closed")
+			}
+			r.fire(200 * time.Millisecond)
+			if !r.quiet() {
+				t.Fatal("renewals continue")
+			}
+			if !eventually(2*time.Second, func() bool { return r.stops.Load() == 1 }) {
+				t.Fatalf("renewal ticker stopped %d times, want 1", r.stops.Load())
+			}
+		})
+	}
+}
+
+// Streams and renewals end with the hub.
+func TestWatchEndsWithHub(t *testing.T) {
+	r := newLiveRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { r.h.Run(ctx); close(done) }()
+	c, stop, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	cancel()
+	<-done
+	select {
+	case _, open := <-c:
+		if open {
+			t.Fatal("the stream still delivers")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the stream outlived the hub")
+	}
+	if !eventually(2*time.Second, func() bool { return r.stops.Load() == 1 }) {
+		t.Fatalf("renewal ticker stopped %d times, want 1", r.stops.Load())
 	}
 }
