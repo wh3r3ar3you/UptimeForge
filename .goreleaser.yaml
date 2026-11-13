@@ -66,6 +66,15 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# checksums.txt.sig: agents install a binary only if its sha256 is in a
+# checksums.txt signed by a key built into them (internal/update).
+# The private key comes from the UF_RELEASE_KEY secret.
+signs:
+  - artifacts: checksum
+    cmd: go
+    args: [run, ./tools/sign, "${artifact}"]
+    signature: "${artifact}.sig"
+
 release:
   prerelease: auto
 

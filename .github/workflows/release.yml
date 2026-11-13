@@ -31,6 +31,8 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Ed25519 key that signs checksums.txt (tools/sign, signs in .goreleaser.yaml).
+          UF_RELEASE_KEY: ${{ secrets.UF_RELEASE_KEY }}
           # A stable tag may sit on the same commit as its release candidate:
           # release this tag, not whichever one git sorts first.
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
