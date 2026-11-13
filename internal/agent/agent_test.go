@@ -548,3 +548,22 @@ func TestAgentWritesConnectedMarker(t *testing.T) {
 		})
 	}
 }
+
+// Config.Hostname replaces the machine's name in the hello (the demo's
+// volunteers must not show the name of the machine it runs on).
+func TestHelloHostname(t *testing.T) {
+	for _, want := range []string{"home-nas", ""} {
+		hub := newUpdateHub(t, nil, "")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		a := New(ctx, Config{HubURL: hub.srv.URL, Token: "t", MetricsInterval: -1, StateDir: t.TempDir(), Hostname: want}, slog.New(slog.DiscardHandler))
+		go a.Run(ctx)
+		hello := <-hub.hello
+		cancel()
+		if want == "" {
+			want, _ = os.Hostname()
+		}
+		if hello.Hostname != want {
+			t.Errorf("hello hostname = %q, want %q", hello.Hostname, want)
+		}
+	}
+}

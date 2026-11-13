@@ -37,6 +37,7 @@ import (
 	"github.com/wh3r3ar3you/uptimeforge/internal/api"
 	"github.com/wh3r3ar3you/uptimeforge/internal/app"
 	"github.com/wh3r3ar3you/uptimeforge/internal/checks"
+	"github.com/wh3r3ar3you/uptimeforge/internal/geoip"
 	"github.com/wh3r3ar3you/uptimeforge/internal/hub"
 	"github.com/wh3r3ar3you/uptimeforge/internal/model"
 	"github.com/wh3r3ar3you/uptimeforge/internal/store"
@@ -112,6 +113,10 @@ func main() {
 		{ID: "de-hetzner", Name: "Hetzner · DE", Probing: true, Labels: map[string]string{"country": "de", "kind": "dc"}},
 		{ID: "fi-dc", Name: "DC · FI", Probing: true, Labels: map[string]string{"country": "fi", "kind": "dc"}},
 		{ID: "kz-ps", Name: "PS · Almaty", Probing: true, Labels: map[string]string{"country": "kz", "kind": "dc"}},
+		// Checker agents: volunteers' home machines, invited with a one-time code.
+		{ID: "vol-spb", Name: "Volunteer · Saint Petersburg", Role: hub.RoleChecker, Trusted: true, Labels: map[string]string{"country": "ru", "asn": "as8359", "isp": "mts"}},
+		{ID: "vol-kzn", Name: "Volunteer · Kazan", Role: hub.RoleChecker, Labels: map[string]string{"country": "ru", "asn": "as3216", "isp": "beeline"}},
+		{ID: "vol-ekb", Name: "Volunteer · Yekaterinburg", Role: hub.RoleChecker, Labels: map[string]string{"country": "ru", "asn": "as12389", "isp": "rostelecom"}},
 	}
 	tokens := map[string]string{}
 	for i, p := range probes {
@@ -132,6 +137,7 @@ func main() {
 		{Spec: checks.Spec{ID: "fi-helsinki", Type: "xray", Interval: checks.Duration(20 * time.Second), Xray: xr(nodeNL, "fi-helsinki")}, Name: "fi-helsinki · Reality", Group: "VPN nodes"},
 		{Spec: checks.Spec{ID: "old-node", Type: "tcp", Interval: checks.Duration(20 * time.Second), TCP: &checks.TCPParams{Address: fmt.Sprintf("127.0.0.1:%d", dead)}}, Name: "kz-almaty · old node", Group: "VPN nodes"},
 		{Spec: checks.Spec{ID: "ru-relay-wl", Type: "tcp", Interval: checks.Duration(20 * time.Second), TCP: &checks.TCPParams{Address: tcpOK}}, Name: "ru-relay · whitelist", Group: "Whitelist relays", Probes: []string{"country=ru"}},
+		{Spec: checks.Spec{ID: "home-isps", Type: "http", Interval: checks.Duration(20 * time.Second), HTTP: &checks.HTTPParams{URL: target + "/204"}}, Name: "Landing from home ISPs", Group: "Whitelist relays", Probes: []string{"role=checker"}},
 		{Spec: checks.Spec{ID: "tg-proxy", Type: "tcp", Interval: checks.Duration(20 * time.Second), TCP: &checks.TCPParams{Address: tcpOK}}, Name: "Telegram proxy", Group: "Telegram"},
 		{Spec: checks.Spec{ID: "panel", Type: "http", Interval: checks.Duration(20 * time.Second), HTTP: &checks.HTTPParams{URL: target + "/204"}}, Name: "Remnawave panel", Group: "Infrastructure", Probes: []string{"country=nl", "country=de"}},
 	}
@@ -152,9 +158,22 @@ func main() {
 		}
 	}()
 	time.Sleep(300 * time.Millisecond)
-	for _, id := range []string{"de-hetzner", "fi-dc"} {
-		go agent.New(ctx, agent.Config{HubURL: hubURL, Token: tokens[id], MetricsInterval: 5 * time.Second}, log.With("agent", id)).Run(ctx)
+	hosts := map[string]string{"de-hetzner": "hetzner-de", "fi-dc": "fi-dc-1", "vol-spb": "home-nas", "vol-kzn": "minipc"}
+	for _, id := range []string{"de-hetzner", "fi-dc", "vol-spb", "vol-kzn"} {
+		go agent.New(ctx, agent.Config{HubURL: hubURL, Token: tokens[id], MetricsInterval: 5 * time.Second, Hostname: hosts[id]}, log.With("agent", id)).Run(ctx)
 	}
+	// The volunteers connect from loopback here: give them the networks a
+	// real hub would read from their address.
+	go func() {
+		time.Sleep(3 * time.Second)
+		for id, n := range map[string]geoip.Network{
+			"vol-spb": {Country: "ru", ASN: "as8359", Org: "MTS PJSC"},
+			"vol-kzn": {Country: "ru", ASN: "as3216", Org: "PJSC VimpelCom"},
+			"vol-ekb": {Country: "ru", ASN: "as12389", Org: "PJSC Rostelecom"},
+		} {
+			a.Hub.SetNetwork(id, n)
+		}
+	}()
 	log.Info("demo is running", "url", hubURL, "login", "admin / admin12345")
 	a.Run(ctx)
 }
@@ -279,15 +298,20 @@ func seed(ctx context.Context, st *store.Store, probes []hub.ProbeConfig, list [
 	r := rand.New(rand.NewPCG(1, 2))
 	now := time.Now().Truncate(time.Minute)
 	start := now.Add(-7 * 24 * time.Hour)
-	base := map[string]float64{"hub": 18, "ru-home": 62, "ru-msk": 48, "de-hetzner": 24, "fi-dc": 31, "kz-ps": 90}
+	base := map[string]float64{"hub": 18, "ru-home": 62, "ru-msk": 48, "de-hetzner": 24, "fi-dc": 31, "kz-ps": 90, "vol-spb": 41, "vol-kzn": 55, "vol-ekb": 70}
 	var samples []store.Sample
 	for _, c := range list {
 		for _, p := range probes {
 			if p.ID == "kz-ps" {
 				continue
 			}
+			// Checkers run only what is pointed at them explicitly.
+			mine := len(c.Probes) > 0 && c.Probes[0] == "role=checker"
+			if p.Checker() != mine {
+				continue
+			}
 			ru := p.Labels["country"] == "ru"
-			if len(c.Probes) > 0 && !(c.Probes[0] == "country=ru" && ru) && !(c.Probes[0] == "id="+p.ID) &&
+			if !mine && len(c.Probes) > 0 && !(c.Probes[0] == "country=ru" && ru) && !(c.Probes[0] == "id="+p.ID) &&
 				!(strings.HasPrefix(c.Probes[0], "country=") && strings.TrimPrefix(c.Probes[0], "country=") == p.Labels["country"]) &&
 				!(len(c.Probes) > 1 && strings.TrimPrefix(c.Probes[1], "country=") == p.Labels["country"]) {
 				continue

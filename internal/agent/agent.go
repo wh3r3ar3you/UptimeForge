@@ -46,6 +46,8 @@ type Config struct {
 	Token           string
 	MetricsInterval time.Duration // host metrics period; 0 = 15s, <0 = off
 	NICs            []string      // interfaces counted as traffic; empty = auto
+	// Hostname is the name the agent gives the hub; empty = the machine's.
+	Hostname string
 	// MinLive is the floor for a live command's interval; 0 = 500ms. A test
 	// hook: production leaves it unset.
 	MinLive time.Duration
@@ -332,7 +334,10 @@ func (a *Agent) session(ctx context.Context) error {
 	defer conn.CloseNow()
 	conn.SetReadLimit(16 << 20)
 
-	host, _ := os.Hostname()
+	host := a.cfg.Hostname
+	if host == "" {
+		host, _ = os.Hostname()
+	}
 	hello, _ := proto.Encode(proto.TypeHello, proto.Hello{
 		Proto: proto.Version, Version: version.Version, Hostname: host, OS: runtime.GOOS, Arch: runtime.GOARCH,
 		Launcher: a.cfg.Launcher,
