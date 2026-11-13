@@ -28,16 +28,26 @@ import (
 	"github.com/wh3r3ar3you/uptimeforge/internal/version"
 )
 
+// oneOffArgs drops a leading "launch" in front of a one-off subcommand: the
+// agent image's entrypoint is "uptimeforge-agent launch", and
+// `docker run <image> check …` must still run the check.
+func oneOffArgs(args []string) []string {
+	if len(args) > 1 && args[0] == "launch" && (args[1] == "check" || args[1] == "version") {
+		return args[1:]
+	}
+	return args
+}
+
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+	if args := oneOffArgs(os.Args[1:]); len(args) > 0 {
+		switch args[0] {
 		case "check":
-			os.Exit(oneOff(os.Args[2:]))
+			os.Exit(oneOff(args[1:]))
 		case "version":
 			fmt.Println(version.Version)
 			return
 		case "launch":
-			os.Exit(launch(os.Args[2:]))
+			os.Exit(launch(args[1:]))
 		}
 	}
 
