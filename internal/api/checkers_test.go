@@ -273,7 +273,7 @@ func TestJoinScript(t *testing.T) {
 	for _, want := range []string{
 		"default_hub='http://hub.example.com'", "get.docker.com", "compose.yml", "mem_limit: 256m", "cpus: 0.5",
 		"read_only: true", "cap_drop", "network_mode: host", "restart: unless-stopped", "no-new-privileges",
-		":/state", "UF_STATE_DIR", "UF_JOIN", "/install.sh", "docker compose up -d", "set -eu", agentImageFor(version.Version),
+		":/state", "UF_STATE_DIR", "UF_JOIN", "/install.sh", "up -d", "pull", "UF_INSECURE", "set -eu", agentImageFor(version.Version),
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script lacks %q", want)
@@ -284,7 +284,9 @@ func TestJoinScript(t *testing.T) {
 	}
 	if sh, err := exec.LookPath("sh"); err == nil {
 		f := filepath.Join(t.TempDir(), "join.sh")
-		os.WriteFile(f, []byte(script), 0o644)
+		if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		if out, err := exec.Command(sh, "-n", f).CombinedOutput(); err != nil {
 			t.Fatalf("script does not parse: %v\n%s", err, out)
 		}
@@ -318,5 +320,141 @@ func TestInstallScriptAcceptsJoin(t *testing.T) {
 	}
 	if strings.Contains(installScript, `[ -n "${UF_TOKEN:-}" ] || {`) {
 		t.Errorf("install script still demands UF_TOKEN")
+	}
+}
+
+// joinScriptFor fetches /join.sh from a hub and writes it to a file.
+func joinScriptFor(t *testing.T) string {
+	t.Helper()
+	s, _ := startHubWith(t, Options{})
+	r := httptest.NewRequest("GET", "/join.sh", nil)
+	r.Host = "hub.example.com"
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	f := filepath.Join(t.TempDir(), "join.sh")
+	if err := os.WriteFile(f, w.Body.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// runJoin runs the script with stub commands in front of PATH. Each stub
+// appends its name and arguments to the returned log; `docker compose
+// version` fails (Docker engine without the compose plugin) and everything
+// that would install or download fails too.
+func runJoin(t *testing.T, env []string, args ...string) (out string, code int, calls string) {
+	t.Helper()
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Log("no sh on this machine: behavioural join.sh test skipped")
+		t.SkipNow()
+	}
+	script := joinScriptFor(t)
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls.log")
+	stub := func(name, body string) {
+		src := "#!/bin/sh\necho \"" + name + " $*\" >> '" + filepath.ToSlash(log) + "'\n" + body + "\n"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stub("id", "echo 0")
+	stub("docker", `[ "$1 $2" = "compose version" ] && exit 1; exit 0`)
+	for _, n := range []string{"curl", "wget", "apt-get", "dnf", "yum", "apk"} {
+		stub(n, "exit 1")
+	}
+	stub("systemctl", "exit 0")
+	cmd := exec.Command(sh, append([]string{script}, args...)...)
+	cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"UF_DIR="+filepath.ToSlash(filepath.Join(dir, "agent")))
+	cmd.Env = append(cmd.Env, env...)
+	b, err := cmd.CombinedOutput()
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := os.ReadFile(log)
+	return string(b), code, string(c)
+}
+
+// A bad or missing code stops the script before it touches anything.
+func TestJoinScriptRejectsBadCode(t *testing.T) {
+	for _, args := range [][]string{{"a;b"}, {}} {
+		out, code, calls := runJoin(t, []string{"UF_HUB=https://hub.example.com", "UF_JOIN="}, args...)
+		if code != 1 || calls != "" {
+			t.Errorf("args %q: exit %d, calls %q\n%s", args, code, calls, out)
+		}
+	}
+}
+
+// Docker is on the machine but has no compose plugin: the engine must not be
+// reinstalled with get.docker.com, whatever else happens.
+func TestJoinScriptKeepsExistingDocker(t *testing.T) {
+	out, code, calls := runJoin(t, []string{"UF_HUB=https://hub.example.com"}, "abc123")
+	if strings.Contains(calls, "get.docker.com") {
+		t.Fatalf("the Docker engine was reinstalled:\n%s\n%s", calls, out)
+	}
+	if code == 0 || !strings.Contains(calls, "install.sh") {
+		t.Errorf("without compose it must fall back to the binary installer (exit %d):\n%s\n%s", code, calls, out)
+	}
+}
+
+// Docker is absent: the official installer is the way (and the script
+// guards it with a check for the docker binary).
+func TestJoinScriptInstallsDockerOnlyWhenAbsent(t *testing.T) {
+	b, err := os.ReadFile(joinScriptFor(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	guard := strings.Index(s, "if ! have_docker; then")
+	call := strings.Index(s, "install_docker ||")
+	if guard < 0 || call < guard {
+		t.Errorf("install_docker must be called only under `if ! have_docker` (guard %d, call %d)", guard, call)
+	}
+	if n := strings.Count(s, "get.docker.com"); n != 1 {
+		t.Errorf("get.docker.com must appear once, inside install_docker: %d", n)
+	}
+}
+
+// The agent refuses plain http outside loopback without UF_INSECURE=1, so the
+// script says so instead of installing an agent that never starts.
+func TestJoinScriptRefusesPlainHTTP(t *testing.T) {
+	out, code, calls := runJoin(t, []string{"UF_HUB=http://hub.example.com", "UF_INSECURE="}, "abc123")
+	if code != 1 || calls != "" || !strings.Contains(out, "UF_INSECURE=1") {
+		t.Errorf("exit %d, calls %q\n%s", code, calls, out)
+	}
+}
+
+// A failed pull (Docker Hub unreachable) must not send a machine that
+// already has the image to the binary fallback; only `up -d` failing does.
+func TestJoinScriptPullFailureIsNotFatal(t *testing.T) {
+	b, err := os.ReadFile(joinScriptFor(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	i := strings.Index(s, "docker compose pull")
+	j := strings.Index(s, "docker compose up -d")
+	if i < 0 || j < i {
+		t.Fatalf("pull then up expected")
+	}
+	pull := s[i:j]
+	if !strings.Contains(pull, "||") {
+		t.Errorf("a failed pull must be tolerated explicitly:\n%s", pull)
+	}
+	if strings.Contains(pull, "binary_fallback") {
+		t.Errorf("a failed pull falls back to the binary:\n%s", pull)
+	}
+	if !strings.Contains(s[j:], "binary_fallback") {
+		t.Errorf("a failed up must fall back to the binary")
+	}
+}
+
+// Without systemd (OpenWrt) the token must live on flash, not on tmpfs.
+func TestInstallScriptKeepsStateOnFlash(t *testing.T) {
+	if !strings.Contains(installScript, "STATE_DIR=/etc/uptimeforge-agent") {
+		t.Errorf("init.d installs need a persistent state dir")
 	}
 }

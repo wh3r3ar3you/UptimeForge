@@ -54,7 +54,7 @@ FROM base AS agent
 COPY --from=build /out/uptimeforge-agent /usr/local/bin/
 # The token obtained with an invite code lives in a volume mounted here: a new
 # named volume takes the owner of this directory.
-RUN mkdir /state && chown 65532 /state
+RUN mkdir /state && chown uptimeforge /state
 ENV UF_STATE_DIR=/state
 USER uptimeforge
 ENTRYPOINT ["uptimeforge-agent"]

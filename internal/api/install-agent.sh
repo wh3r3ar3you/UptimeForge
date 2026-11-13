@@ -122,7 +122,9 @@ fi
 # No systemd: Entware (/opt/etc/init.d) or plain init.d (OpenWrt).
 initdir=/etc/init.d
 [ -d /opt/etc/init.d ] && initdir=/opt/etc/init.d
-[ "$initdir" = /opt/etc/init.d ] && STATE_DIR=/opt/var/lib/uptimeforge-agent
+# /var is tmpfs on OpenWrt: keep the token on flash (Entware lives on /opt).
+STATE_DIR=/etc/uptimeforge-agent
+[ "$initdir" != /opt/etc/init.d ] || STATE_DIR=/opt/var/lib/uptimeforge-agent
 umask 077
 mkdir -p "$STATE_DIR"
 cat > "$initdir/S99uptimeforge-agent" <<INIT
