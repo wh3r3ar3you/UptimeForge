@@ -4,7 +4,7 @@
 //
 //	go run ./tools/sign keygen 2>pub.txt >priv.txt   # private base64 -> stdout, public -> stderr
 //	UF_RELEASE_KEY=<private base64> go run ./tools/sign dist/checksums.txt   # writes dist/checksums.txt.sig
-//	UF_RELEASE_PUBKEYS=<public base64>[,...] go run ./tools/sign verify dist/checksums.txt
+//	UF_RELEASE_PUBKEYS=<public base64>[,...] go run ./tools/sign verify dist/checksums.txt   # keys default to the built-in update.ReleaseKeys
 package main
 
 import (
@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/wh3r3ar3you/uptimeforge/internal/update"
 )
@@ -86,9 +87,12 @@ func parsePrivateKey(s string) (ed25519.PrivateKey, error) {
 }
 
 func verify(file, pubkeys string, stdout io.Writer) error {
-	keys, err := update.ParsePublicKeys(pubkeys)
-	if err != nil {
-		return fmt.Errorf("UF_RELEASE_PUBKEYS: %w", err)
+	keys := update.ReleaseKeys
+	if strings.TrimSpace(pubkeys) != "" {
+		var err error
+		if keys, err = update.ParsePublicKeys(pubkeys); err != nil {
+			return fmt.Errorf("UF_RELEASE_PUBKEYS: %w", err)
+		}
 	}
 	data, err := os.ReadFile(file)
 	if err != nil {

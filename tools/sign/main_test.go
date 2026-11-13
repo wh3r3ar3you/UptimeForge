@@ -116,3 +116,33 @@ func TestUsage(t *testing.T) {
 		}
 	}
 }
+
+// Without UF_RELEASE_PUBKEYS verify uses the keys built into the agent
+// (update.ReleaseKeys), so the image build does not repeat the key.
+func TestVerifyDefaultsToReleaseKeys(t *testing.T) {
+	priv, pub := newPair(t)
+	file := filepath.Join(t.TempDir(), "checksums.txt")
+	if err := os.WriteFile(file, []byte("abc  x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if err := run([]string{file}, mapEnv(map[string]string{"UF_RELEASE_KEY": priv}), &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	// Signed by a throwaway key: the built-in release key must reject it.
+	if err := run([]string{"verify", file}, mapEnv(nil), &out, &errOut); err == nil {
+		t.Fatal("verify without UF_RELEASE_PUBKEYS accepted a foreign signature")
+	}
+	// The built-in keys are in play: with them swapped for the throwaway
+	// public key the same file passes.
+	keys, err := update.ParsePublicKeys(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := update.ReleaseKeys
+	update.ReleaseKeys = keys
+	defer func() { update.ReleaseKeys = saved }()
+	if err := run([]string{"verify", file}, mapEnv(nil), &out, &errOut); err != nil {
+		t.Fatalf("verify did not fall back to update.ReleaseKeys: %v", err)
+	}
+}

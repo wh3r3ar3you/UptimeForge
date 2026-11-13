@@ -475,6 +475,38 @@ func TestDownloadChecksums(t *testing.T) {
 	}
 }
 
+// The release signature of checksums.txt is served byte for byte next to it,
+// so an agent can verify an update it downloads from the hub.
+func TestDownloadChecksumsSignature(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := startHubWith(t, Options{AgentDir: dir})
+	h := s.Handler()
+	get := func() *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", "/download/checksums.txt.sig", nil))
+		return w
+	}
+	if w := get(); w.Code != 404 {
+		t.Fatalf("no signature shipped: %d", w.Code)
+	}
+	sig := "c2lnbmF0dXJl\n"
+	os.WriteFile(filepath.Join(dir, "checksums.txt.sig"), []byte(sig), 0o644)
+	w := get()
+	if w.Code != 200 || w.Body.String() != sig {
+		t.Fatalf("signature: %d %q", w.Code, w.Body.String())
+	}
+	if cc := w.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("Cache-Control = %q", cc)
+	}
+	// No agents dir: nothing to serve.
+	s2, _ := startHubWith(t, Options{})
+	w = httptest.NewRecorder()
+	s2.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/download/checksums.txt.sig", nil))
+	if w.Code != 404 {
+		t.Errorf("no agents dir: %d", w.Code)
+	}
+}
+
 // The installer checks the binary against the checksums and falls back to
 // the GitHub release of the hub's version when the hub has no binary.
 func TestInstallScriptVerifiesChecksum(t *testing.T) {

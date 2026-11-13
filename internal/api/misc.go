@@ -506,6 +506,18 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 		s.checksums(w, r)
 		return
 	}
+	if name == "checksums.txt.sig" && s.agentDir != "" {
+		// The release signature of checksums.txt, served byte for byte.
+		path := filepath.Join(s.agentDir, name)
+		if st, err := os.Stat(path); err != nil || !st.Mode().IsRegular() {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFile(w, r, path)
+		return
+	}
 	if s.agentDir == "" || !agentFile.MatchString(name) {
 		http.NotFound(w, r)
 		return

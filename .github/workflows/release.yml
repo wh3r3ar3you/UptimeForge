@@ -38,7 +38,9 @@ jobs:
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
 
   images:
-    needs: test
+    # The hub image ships the signed agents of this release: they exist only
+    # once GoReleaser has published it.
+    needs: [test, binaries]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -71,6 +73,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           # The same version string as the GoReleaser binaries: 0.1.0, not v0.1.0.
-          build-args: VERSION=${{ steps.meta.outputs.version }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            AGENTS_FROM=https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
