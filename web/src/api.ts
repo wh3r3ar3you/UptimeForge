@@ -1,4 +1,5 @@
 import { QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef, useState } from 'react';
 
 // ---- Types mirroring the hub's JSON ----
 
@@ -315,13 +316,113 @@ export const useUptime = (id: string, days = 90) =>
 export const useProbes = (o?: Live) =>
   useQuery({ queryKey: ['probes'], queryFn: () => api<{ probes: ProbeRow[]; hub_url: string }>('GET', '/api/v1/probes'), ...cadence(o, LIVE) });
 /** q is a window from useWindow: "range=24h" or "from=…&to=…". */
-export const useProbeMetrics = (id: string, q: string) =>
+export const useProbeMetrics = (id: string, q: string, enabled = true) =>
   useQuery({
+    enabled,
     queryKey: ['probe-metrics', id, q],
     queryFn: () => api<{ from: number; to: number; points: SysPoint[] | null }>('GET', `/api/v1/probes/${enc(id)}/metrics?${q}`),
     refetchInterval: q.startsWith('from=') ? false : 30_000,
     placeholderData: (prev) => prev,
   });
+
+/** One event of /probes/{id}/live: the agent's metrics, taken at `at` (unix ms, hub clock). */
+export interface LivePoint extends Metrics { at: number; age?: number }
+
+/**
+ * sysPoint gives a live point the shape of a stored one, with the columns the
+ * hub stores (app/recorder.go sysExt), so the charts map both the same way.
+ * One sample is its own average and its own peak.
+ */
+export function sysPoint(m: LivePoint): SysPoint {
+  const e = m.ext;
+  return {
+    t: m.at / 1000, cpu: m.cpu, cpu_max: m.cpu, mem: m.mem_used, mem_total: m.mem_total, disk: m.disk_used, disk_total: m.disk_total,
+    rx: m.rx, rx_max: m.rx, tx: m.tx, tx_max: m.tx, load1: m.load1, load5: m.load5, load15: m.load15,
+    x: e && {
+      cpu_user: e.cpu_user, cpu_system: e.cpu_system, cpu_iowait: e.cpu_iowait, cpu_steal: e.cpu_steal, cpu_irq: e.cpu_irq,
+      mem_cache: e.mem_cache, swap_used: m.swap_used ?? 0, swap_total: e.swap_total,
+      disk_read: e.disk_read, disk_write: e.disk_write, disk_rops: e.disk_rops, disk_wops: e.disk_wops, disk_util: e.disk_util,
+      rx_pkts: e.rx_pkts, tx_pkts: e.tx_pkts, net_err: e.net_err, tcp: m.tcp ?? 0, procs: e.procs, procs_blocked: e.procs_blocked,
+    },
+  };
+}
+
+/** The live window: this many points, a minute at the live rate. */
+export const LIVE_POINTS = 60;
+/** A tab hidden this long closes its stream, so a forgotten tab does not keep an agent at 1 s; it reopens when shown. */
+const LIVE_HIDDEN_MS = 30_000;
+
+/**
+ * useLiveMetrics streams a server's host metrics while `on`: the last
+ * LIVE_POINTS points, the stream's state, and `now` on the hub's clock,
+ * ticking every second so the time axis slides between points. `slow` is
+ * an agent that sent at most one point in the last 5 s: it predates live
+ * mode and keeps its usual rate.
+ */
+export function useLiveMetrics(id: string, on: boolean) {
+  const [points, setPoints] = useState<SysPoint[]>([]);
+  const [state, setState] = useState<'connecting' | 'open' | 'lost' | 'failed'>('connecting');
+  const [opened, setOpened] = useState(0);
+  const [arrivals, setArrivals] = useState<number[]>([]);
+  const [awake, setAwake] = useState(true);
+  const [tick, setTick] = useState(() => Date.now());
+  // The hub's clock minus ours: points are stamped by the hub, and a browser
+  // a few seconds behind would draw the newest ones past the axis end.
+  const skew = useRef(0);
+
+  useEffect(() => {
+    if (!on) return;
+    let timer: number | undefined;
+    const check = () => {
+      window.clearTimeout(timer);
+      if (document.visibilityState === 'hidden') timer = window.setTimeout(() => setAwake(false), LIVE_HIDDEN_MS);
+      else setAwake(true);
+    };
+    check();
+    document.addEventListener('visibilitychange', check);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', check);
+    };
+  }, [on]);
+
+  useEffect(() => {
+    if (!on || !awake) return;
+    setPoints([]);
+    setArrivals([]);
+    setState('connecting');
+    const es = new EventSource(`/api/v1/probes/${enc(id)}/live`);
+    es.onopen = () => {
+      setState('open');
+      setOpened(Date.now());
+    };
+    es.onmessage = (ev) => {
+      let m: LivePoint;
+      try {
+        m = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      const now = Date.now();
+      if (!m.age || m.age < 2) skew.current = m.at - now;
+      setState('open');
+      setPoints((ps) => [...ps, sysPoint(m)].sort((a, b) => a.t - b.t).slice(-LIVE_POINTS));
+      setArrivals((a) => [...a.filter((x) => x > now - 10_000), now]);
+    };
+    // EventSource retries a dropped connection by itself (CONNECTING); a
+    // refused one (404, 401) is CLOSED for good.
+    es.onerror = () => setState(es.readyState === EventSource.CLOSED ? 'failed' : 'lost');
+    const iv = window.setInterval(() => setTick(Date.now()), 1000);
+    return () => {
+      es.close();
+      window.clearInterval(iv);
+    };
+  }, [id, on, awake]);
+
+  const slow = state === 'open' && tick - opened >= 5000 && arrivals.filter((x) => x > tick - 5000).length <= 1;
+  return { points, state, slow, now: tick + skew.current };
+}
+
 export const useSparklines = () =>
   useQuery({ queryKey: ['sparklines'], queryFn: () => api<Record<string, Spark>>('GET', '/api/v1/sparklines'), refetchInterval: 60_000 });
 export type IncidentList = { open: Incident[] | null; history: Incident[] | null };

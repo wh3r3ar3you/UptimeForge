@@ -120,9 +120,13 @@ interface TimeOpts {
   zoom?: boolean;
 }
 
+/** Windows this short (the live minute, a tight zoom) label time to the second. */
+const SECONDS_SPAN = 10 * 60_000;
+
 function timeLabel(ms: number, spanMs: number) {
   const d = new Date(ms);
   const p = (n: number) => String(n).padStart(2, '0');
+  if (spanMs <= SECONDS_SPAN) return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
   if (spanMs > 2 * 86400_000) return `${p(d.getDate())}.${p(d.getMonth() + 1)}`;
   if (spanMs > 86400_000 && d.getHours() === 0 && d.getMinutes() === 0) return `${p(d.getDate())}.${p(d.getMonth() + 1)}`;
   return `${p(d.getHours())}:${p(d.getMinutes())}`;
@@ -150,10 +154,10 @@ function escapeHTML(s: string) {
   return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 }
 
-function tipTime(ms: number) {
+function tipTime(ms: number, spanMs: number) {
   const d = new Date(ms);
   const p = (n: number) => String(n).padStart(2, '0');
-  return `${p(d.getDate())}.${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}${spanMs <= SECONDS_SPAN ? `:${p(d.getSeconds())}` : ''}`;
 }
 
 /**
@@ -231,7 +235,7 @@ export function timeOption(o: TimeOpts): EChartsCoreOption {
       formatter: (params: { seriesName: string; value: [number, number | null]; color: string }[]) => {
         const rows = params.filter((p) => !p.seriesName.includes('__') && p.value[1] != null);
         if (!params.length) return '';
-        const head = `<div style="color:${pal.muted};margin-bottom:6px">${tipTime(params[0].value[0])}</div>`;
+        const head = `<div style="color:${pal.muted};margin-bottom:6px">${tipTime(params[0].value[0], span)}</div>`;
         const ordered = o.stack || o.series.some((s) => s.stack) ? rows.reverse() : rows.sort((a, b) => (b.value[1] ?? 0) - (a.value[1] ?? 0));
         return head + ordered
           .map((p) =>
@@ -284,6 +288,8 @@ export function seriesStats(s: LineSeries): Stats {
 }
 
 export const RANGES = ['1h', '6h', '24h', '7d', '30d'];
+/** The live range: a server's last minute, streamed point by point instead of read from storage. */
+export const LIVE_RANGE = '1m';
 
 /**
  * useWindow is the time window of a page's charts: a named range, or a

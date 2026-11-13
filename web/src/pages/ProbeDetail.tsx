@@ -247,7 +247,7 @@ export default function ProbeDetail() {
 
       {p.network && <NetworkCard n={p.network} admin={isAdmin} />}
 
-      {p.mode !== 'via' && !checker && <HostCharts id={id} cores={si?.cores} />}
+      {p.mode !== 'via' && !checker && <HostCharts id={id} cores={si?.cores} online={p.online} />}
       {p.mode === 'via' && <Text c="dimmed" size="sm">{t('no_metrics')}</Text>}
       {checker && <Text c="dimmed" size="sm">{t('no_metrics_checker')}</Text>}
 
