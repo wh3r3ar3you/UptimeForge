@@ -46,6 +46,9 @@ type Assign struct {
 	Via         json.RawMessage `json:"via,omitempty"` // upstream proxy (Xray outbound) for every check
 	Concurrency int             `json:"concurrency,omitempty"`
 	Checks      []checks.Spec   `json:"checks"`
+	// Metrics false tells the agent to send no host metrics or sysinfo; nil
+	// (older hubs) means send them.
+	Metrics *bool `json:"metrics,omitempty"`
 }
 
 type Results struct {

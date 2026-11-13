@@ -112,13 +112,33 @@ type ProbeConfig struct {
 	// Probing makes an agent run checks too. Off by default: an agent only
 	// reports its server's metrics until someone asks it to probe.
 	Probing bool `yaml:"probing" json:"probing,omitempty"`
+
+	// Role is RoleServer (or empty) for our own infrastructure and RoleChecker
+	// for a volunteer probe point on someone else's machine. Only agents have
+	// a role.
+	Role string `yaml:"role" json:"role,omitempty"`
+	// Trusted lets a checker run checks that carry secrets (VPN links,
+	// passwords). Only for checkers.
+	Trusted bool `yaml:"trusted" json:"trusted,omitempty"`
+	// LabelsLocked names the labels an admin set by hand.
+	LabelsLocked []string `yaml:"labels_locked" json:"labels_locked,omitempty"`
 }
+
+const (
+	RoleServer  = "server"
+	RoleChecker = "checker"
+)
 
 func (p *ProbeConfig) Virtual() bool { return p.Via != "" || p.Local }
 
+// Checker is true for volunteer probe points: they run checks that select
+// them explicitly and report no host metrics.
+func (p *ProbeConfig) Checker() bool { return p.Role == RoleChecker }
+
 // RunsChecks is true for probes that get checks assigned: virtual ones exist
 // for nothing else, agents only when probing is switched on.
-func (p *ProbeConfig) RunsChecks() bool { return p.Probing || p.Virtual() }
+// Checkers exist to run checks, but only the ones that select them.
+func (p *ProbeConfig) RunsChecks() bool { return p.Probing || p.Virtual() || p.Checker() }
 
 // HashToken is how agent tokens are stored and compared.
 func HashToken(t string) string {
@@ -147,6 +167,8 @@ type CheckConfig struct {
 	target   string // derived: protocol and endpoint shown in alerts
 	baseline bool
 	parent   string // subscription the check was expanded from
+	// carriesSecrets keeps the check off untrusted checkers; set by rebuild.
+	carriesSecrets bool
 }
 
 type Telegram struct {
@@ -345,6 +367,17 @@ func (c *Config) normalize() error {
 		if modes != 1 {
 			return fmt.Errorf("probe %s: set exactly one of token, via, local", p.ID)
 		}
+		switch p.Role {
+		case "", RoleServer, RoleChecker:
+		default:
+			return fmt.Errorf("probe %s: role must be %s or %s", p.ID, RoleServer, RoleChecker)
+		}
+		if p.Role != "" && p.Virtual() {
+			return fmt.Errorf("probe %s: role is only for agents", p.ID)
+		}
+		if p.Trusted && !p.Checker() {
+			return fmt.Errorf("probe %s: trusted is only for role %s", p.ID, RoleChecker)
+		}
 		if p.TokenHash != "" {
 			if other, dup := tokens[p.TokenHash]; dup {
 				return fmt.Errorf("probes %s and %s share a token", other, p.ID)
@@ -360,6 +393,13 @@ func (c *Config) normalize() error {
 			p.Labels = map[string]string{}
 		}
 		p.Labels["id"] = p.ID
+		// The label follows the role, so a check can pick every checker and
+		// only checkers.
+		if p.Checker() {
+			p.Labels["role"] = RoleChecker
+		} else if p.Labels["role"] == RoleChecker {
+			delete(p.Labels, "role")
+		}
 	}
 
 	cids := map[string]bool{}
@@ -489,7 +529,6 @@ func (c *Config) withDefaults(ch CheckConfig) CheckConfig {
 	return ch
 }
 
-// selects reports whether the probe matches the check's selectors.
 // names reports whether the check lists this probe by id. That is a choice made
 // for this one check, so it works on an agent with probing off.
 func (ch *CheckConfig) names(p *ProbeConfig) bool {
@@ -502,9 +541,15 @@ func (ch *CheckConfig) runsOn(p *ProbeConfig) bool {
 	if info, ok := checks.TypeOf(ch.Type); ok && info.HubOnly {
 		return p.Local
 	}
+	if p.Checker() && ch.carriesSecrets && !p.Trusted {
+		return false // a stranger's machine must not see VPN links or passwords
+	}
 	return (p.RunsChecks() || ch.names(p)) && ch.selects(p)
 }
 
+// selects reports whether the probe matches the check's selectors. A checker
+// is never part of "everyone" (no selectors or "*"): a selector has to pick it
+// out by a label.
 func (ch *CheckConfig) selects(p *ProbeConfig) bool {
 	match := func(sel string) bool {
 		if sel == "*" {
@@ -513,9 +558,10 @@ func (ch *CheckConfig) selects(p *ProbeConfig) bool {
 		k, v, _ := strings.Cut(sel, "=")
 		return p.Labels[k] == v
 	}
-	in := len(ch.Probes) == 0
+	explicit := p.Checker()
+	in := len(ch.Probes) == 0 && !explicit
 	for _, s := range ch.Probes {
-		in = in || match(s)
+		in = in || (match(s) && !(explicit && s == "*"))
 	}
 	for _, s := range ch.Exclude {
 		if match(s) {

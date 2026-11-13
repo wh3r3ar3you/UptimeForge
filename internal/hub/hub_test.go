@@ -2626,3 +2626,111 @@ func TestRestoredBlockedDoesNotEscalateOnPartialSet(t *testing.T) {
 		t.Fatalf("kind %s", k)
 	}
 }
+
+func TestCheckerRoleValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		p    ProbeConfig
+		want string
+	}{
+		{"via checker", ProbeConfig{ID: "v", Via: "socks5://127.0.0.1:1080", Role: RoleChecker}, "role is only for agents"},
+		{"local checker", ProbeConfig{ID: "l", Local: true, Role: RoleChecker}, "role is only for agents"},
+		{"trusted server", ProbeConfig{ID: "s", Token: "token-s-0123456789", Trusted: true}, "trusted"},
+		{"unknown role", ProbeConfig{ID: "u", Token: "token-u-0123456789", Role: "boss"}, "role"},
+	}
+	for _, tc := range cases {
+		c := &Config{Probes: []ProbeConfig{tc.p}}
+		if err := c.normalize(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: want error with %q, got %v", tc.name, tc.want, err)
+		}
+	}
+	c := &Config{Probes: []ProbeConfig{
+		{ID: "chk", Token: "token-chk-0123456789", Role: RoleChecker, Trusted: true},
+		// A stale label from when it was a checker must not keep it in "role=checker".
+		{ID: "srv", Token: "token-srv-0123456789", Role: RoleServer, Labels: map[string]string{"role": RoleChecker}},
+	}}
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if p := c.Probes[0]; !p.Checker() || p.Labels["role"] != RoleChecker || !p.RunsChecks() {
+		t.Fatalf("checker: role %q labels %v", p.Role, p.Labels)
+	}
+	if p := c.Probes[1]; p.Checker() || p.Labels["role"] != "" || p.RunsChecks() {
+		t.Fatalf("server: role %q labels %v", p.Role, p.Labels)
+	}
+}
+
+// checkerHub has a checker with isp=mts and a probing server agent; checks is
+// what they are offered.
+func checkerHub(t *testing.T, trusted bool, cs ...CheckConfig) *Hub {
+	t.Helper()
+	cfg := &Config{DataDir: t.TempDir(), Baseline: []checks.Spec{},
+		Probes: []ProbeConfig{
+			{ID: "chk", Token: "token-chk-0123456789", Role: RoleChecker, Trusted: trusted, Labels: map[string]string{"isp": "mts"}},
+			{ID: "srv", Token: "token-srv-0123456789", Probing: true, Labels: map[string]string{"isp": "mts"}},
+		},
+		Checks: cs}
+	h, err := New(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+func assignedIDs(h *Hub, probe string) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var ids []string
+	for _, s := range h.assignmentFor(h.probes[probe]).Checks {
+		ids = append(ids, s.ID)
+	}
+	return ids
+}
+
+func tcpCheck(id string, probes ...string) CheckConfig {
+	return CheckConfig{Spec: checks.Spec{ID: id, Type: "tcp", TCP: &checks.TCPParams{Address: "10.0.0.1:443"}}, Probes: probes}
+}
+
+// A checker is someone else's machine: "everywhere" must not reach it, only a
+// selector that picks it out.
+func TestCheckerGetsOnlyExplicitChecks(t *testing.T) {
+	h := checkerHub(t, false,
+		tcpCheck("all"), tcpCheck("star", "*"),
+		tcpCheck("role", "role=checker"), tcpCheck("isp", "isp=mts"), tcpCheck("id", "id=chk"),
+		tcpCheck("other-isp", "isp=beeline"),
+		CheckConfig{Spec: checks.Spec{ID: "excluded", Type: "tcp", TCP: &checks.TCPParams{Address: "10.0.0.1:443"}}, Probes: []string{"isp=mts"}, Exclude: []string{"role=checker"}},
+	)
+	if got, want := assignedIDs(h, "chk"), []string{"role", "isp", "id"}; !slices.Equal(got, want) {
+		t.Fatalf("checker got %v, want %v", got, want)
+	}
+	if got, want := assignedIDs(h, "srv"), []string{"all", "star", "isp", "excluded"}; !slices.Equal(got, want) {
+		t.Fatalf("server agent got %v, want %v", got, want)
+	}
+}
+
+func TestUntrustedCheckerGetsNoSecrets(t *testing.T) {
+	vpn := CheckConfig{Spec: checks.Spec{ID: "vpn", Type: "xray", Xray: &checks.XrayParams{
+		Link: "vless://b831381d-6324-4d53-ad4f-8cda48b30811@ok.example.com:443?type=tcp#ok"}}, Probes: []string{"isp=mts"}}
+	plain := tcpCheck("plain", "isp=mts")
+	if got, want := assignedIDs(checkerHub(t, false, vpn, plain), "chk"), []string{"plain"}; !slices.Equal(got, want) {
+		t.Fatalf("untrusted checker got %v, want %v", got, want)
+	}
+	if got, want := assignedIDs(checkerHub(t, true, vpn, plain), "chk"), []string{"vpn", "plain"}; !slices.Equal(got, want) {
+		t.Fatalf("trusted checker got %v, want %v", got, want)
+	}
+	if got, want := assignedIDs(checkerHub(t, false, vpn, plain), "srv"), []string{"vpn", "plain"}; !slices.Equal(got, want) {
+		t.Fatalf("server agent got %v, want %v", got, want)
+	}
+}
+
+func TestCheckerAssignHasNoMetrics(t *testing.T) {
+	h := checkerHub(t, false)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if m := h.assignmentFor(h.probes["chk"]).Metrics; m == nil || *m {
+		t.Fatalf("checker assign metrics = %v, want false", m)
+	}
+	if m := h.assignmentFor(h.probes["srv"]).Metrics; m != nil {
+		t.Fatalf("server assign metrics = %v, want nil", *m)
+	}
+}

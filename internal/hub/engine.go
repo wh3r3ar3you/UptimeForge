@@ -40,6 +40,7 @@ func (h *Hub) rebuild() {
 	next := map[string]*check{}
 	h.checkOrder = h.checkOrder[:0]
 	for _, c := range effective {
+		c.carriesSecrets = checks.CarriesSecrets(&c.Spec)
 		ch := h.checks[c.ID]
 		if ch == nil {
 			ch = &check{state: map[string]*pcState{}, kind: model.KindUnknown}
@@ -127,6 +128,9 @@ func (h *Hub) baselineCheck(id string, s checks.Spec, only []string) CheckConfig
 
 func (h *Hub) assignmentFor(p *probe) proto.Assign {
 	a := proto.Assign{Probe: p.cfg.ID, Via: p.via, Concurrency: p.cfg.Concurrency, Checks: []checks.Spec{}}
+	if p.cfg.Checker() {
+		a.Metrics = new(bool) // a checker's host is not ours to watch
+	}
 	for _, id := range h.checkOrder {
 		ch := h.checks[id]
 		for _, pid := range ch.probes {
