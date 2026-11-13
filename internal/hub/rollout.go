@@ -78,6 +78,7 @@ type watch struct {
 	sent        time.Time
 	on          time.Time // on the target without a break since; zero when not
 	wasOn       bool      // was on the target since the send
+	proven      bool      // ran a clean rolloutSoak on the target at least once
 	reconnected bool      // connected again since the send
 	missing     time.Time // off the target since: the send, or when it dropped off
 }
@@ -272,9 +273,11 @@ func (h *Hub) follow(id string, w *watch, now time.Time) {
 		}
 		w.wasOn, w.missing = true, time.Time{}
 		soaked := now.Sub(w.on) >= rolloutSoak
-		if !soaked && now.Sub(w.sent) >= rolloutFlapLimit {
+		w.proven = w.proven || soaked
+		if !w.proven && now.Sub(w.sent) >= rolloutFlapLimit {
 			// Back again, but never for a clean soak since the update: it
-			// keeps dying on the new version.
+			// keeps dying on the new version. One that proved the version
+			// and blips later is just back.
 			r.stragglers[id], r.halted = reasonUpdateMissing, true
 			return
 		}
@@ -298,7 +301,7 @@ func (h *Hub) follow(id string, w *watch, now time.Time) {
 	case p.online && w.wasOn:
 		// It ran the new version and is back on an older one: rolled back.
 		r.stragglers[id] = reasonUpdateRolledBack
-	case now.Sub(w.missing) < updateWait && now.Sub(w.sent) < rolloutFlapLimit:
+	case now.Sub(w.missing) < updateWait && (w.proven || now.Sub(w.sent) < rolloutFlapLimit):
 		return
 	case p.online && w.reconnected:
 		// Back on its old version without ever reaching the new one.

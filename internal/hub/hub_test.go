@@ -4675,3 +4675,61 @@ func TestRolloutFlappingMemberHalts(t *testing.T) {
 		t.Fatal("the canary ran 10 minutes on the new version, the incident is still open")
 	}
 }
+
+// An agent that ran its clean 10 minutes on the new version and later
+// blips (a reboot two hours after the update, while the rollout is held) is
+// back at once: that is no straggler.
+func TestRolloutProvenAgentBlipIsNoStraggler(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02", "a03")
+	r.restart("a03")
+	r.drop("a02") // a02 does not come back: the stage is held, then halted
+	r.advance(rolloutSoak)
+	r.tick()
+	stragglers := func() []string {
+		var out []string
+		for _, inc := range r.h.Snapshot().Incidents {
+			if inc.Key == rolloutKey {
+				for _, l := range inc.Lines {
+					out = append(out, l.Probe)
+				}
+			}
+		}
+		return out
+	}
+	if got := stragglers(); !slices.Equal(got, []string{"a02"}) {
+		t.Fatalf("stragglers %v, want [a02]", got)
+	}
+	r.advance(2 * time.Hour)
+	r.tick()
+	r.drop("a03")
+	r.advance(30 * time.Second)
+	r.connect("a03", rollTarget, true)
+	r.tick()
+	if got := stragglers(); !slices.Equal(got, []string{"a02"}) {
+		t.Fatalf("a proven agent back after a 30 s blip became a straggler: %v", got)
+	}
+	if n := countEvents(r.rec, model.EventUpdate, rolloutKey); n != 0 {
+		t.Fatalf("the blip changed the incident %d times", n)
+	}
+	// Gone for good, it is a straggler by the ordinary rule.
+	r.drop("a03")
+	r.advance(updateWait - time.Second)
+	r.tick()
+	if got := stragglers(); !slices.Equal(got, []string{"a02"}) {
+		t.Fatalf("stragglers %v before 10 minutes", got)
+	}
+	r.advance(time.Second)
+	r.tick()
+	if got := stragglers(); !slices.Equal(got, []string{"a02", "a03"}) {
+		t.Fatalf("a proven agent gone 10 minutes: stragglers %v", got)
+	}
+}
