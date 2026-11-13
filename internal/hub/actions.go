@@ -150,11 +150,12 @@ type RunOutcome struct {
 
 // errNeedsTrusted is the run-once answer of an untrusted checker to a check
 // that carries secrets.
-const errNeedsTrusted = "нужен доверенный агент: the check carries secrets and this checker is not trusted"
+const errNeedsTrusted = "needs a trusted agent: the check carries secrets"
 
-// RunOnce runs spec right now on the given probes (all online ones if empty)
-// and waits for every answer: the "check this config from there" tool.
-// An untrusted checker is not sent a spec that carries secrets.
+// RunOnce runs spec right now on the given probes and waits for every
+// answer: the "check this config from there" tool. No probes means every
+// probe but the checkers, which take part only when picked by id. An
+// untrusted checker is not sent a spec that carries secrets.
 func (h *Hub) RunOnce(ctx context.Context, spec checks.Spec, probeIDs []string) []RunOutcome {
 	if spec.ID == "" {
 		spec.ID = "_run"
@@ -169,7 +170,11 @@ func (h *Hub) RunOnce(ctx context.Context, spec checks.Spec, probeIDs []string) 
 
 	h.mu.Lock()
 	if len(probeIDs) == 0 {
-		probeIDs = append(probeIDs, h.probeOrder...)
+		for _, id := range h.probeOrder {
+			if p := h.probes[id]; p != nil && !p.cfg.Checker() {
+				probeIDs = append(probeIDs, id)
+			}
+		}
 	}
 	type target struct {
 		out RunOutcome

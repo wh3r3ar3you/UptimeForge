@@ -34,10 +34,10 @@ var (
 type Invite struct {
 	ID      string    `json:"id"`
 	Name    string    `json:"name,omitempty"`
-	Trusted bool      `json:"trusted,omitempty"`
+	Trusted bool      `json:"trusted"`
 	Created time.Time `json:"created"`
 	Expires time.Time `json:"expires"`
-	Used    bool      `json:"used,omitempty"`
+	Used    bool      `json:"used"`
 }
 
 // storedInvite is an invite as it is in the database.
@@ -60,7 +60,7 @@ func (a *App) CreateInvite(ctx context.Context, name string, trusted bool) (Invi
 	id := make([]byte, 6)
 	rand.Read(id)
 	now := time.Now().UTC()
-	inv := Invite{ID: hex.EncodeToString(id), Name: cleanName(name), Trusted: trusted, Created: now, Expires: now.Add(InviteTTL)}
+	inv := Invite{ID: hex.EncodeToString(id), Name: CleanName(name), Trusted: trusted, Created: now, Expires: now.Add(InviteTTL)}
 	a.inviteMu.Lock()
 	defer a.inviteMu.Unlock()
 	if err := a.Store.PutObject(ctx, kindInvite, inv.ID, storedInvite{Invite: inv, CodeHash: hashCode(code)}); err != nil {
@@ -97,7 +97,12 @@ func (a *App) RevokeInvite(ctx context.Context, id string) error {
 // token. The checker is named after the invite, or after the host when the
 // invite has no name. A code works once: it is spent before the probe is
 // made, and given back only if the probe could not be made.
+//
+// A started join runs to the end even if the agent hangs up: stopping
+// between the probe and the reply would leave a probe whose token nobody
+// has, and hand back a code that makes another one.
 func (a *App) Join(ctx context.Context, code, hostname, os, arch string) (probeID, token string, err error) {
+	ctx = context.WithoutCancel(ctx)
 	a.inviteMu.Lock()
 	defer a.inviteMu.Unlock()
 	inv, err := a.findInvite(ctx, code)
@@ -117,14 +122,14 @@ func (a *App) Join(ctx context.Context, code, hostname, os, arch string) (probeI
 	defer func() {
 		if err != nil {
 			inv.Used = false
-			if perr := a.Store.PutObject(context.WithoutCancel(ctx), kindInvite, inv.ID, inv); perr != nil {
+			if perr := a.Store.PutObject(ctx, kindInvite, inv.ID, inv); perr != nil {
 				a.Log.Error("invite could not be given back after a failed join", "invite", inv.ID, "err", perr)
 			}
 		}
 	}()
 	name := inv.Name
 	if name == "" {
-		name = cleanName(hostname)
+		name = CleanName(hostname)
 	}
 	base := slugify(name)
 	if base == "" {
@@ -138,6 +143,11 @@ func (a *App) Join(ctx context.Context, code, hostname, os, arch string) (probeI
 		token, err = a.SaveProbe(ctx, hub.ProbeConfig{ID: id, Name: name, Role: hub.RoleChecker, Trusted: inv.Trusted}, true)
 		switch {
 		case err == nil:
+			return id, token, nil
+		case token != "":
+			// The probe is stored, only the hub did not take the new config:
+			// the next reload brings it in. The exchange itself is done.
+			a.Log.Error("checker joined but the hub did not reload", "probe", id, "err", err)
 			return id, token, nil
 		case errors.Is(err, ErrExists), errors.Is(err, ErrManaged):
 			continue
@@ -167,9 +177,9 @@ func (a *App) findInvite(ctx context.Context, code string) (storedInvite, error)
 	return storedInvite{}, ErrInviteUnknown
 }
 
-// cleanName makes a name from someone else's input fit to show: no control
+// CleanName makes a name from someone else's input fit to show: no control
 // characters, no surrounding space, at most 64 characters.
-func cleanName(s string) string {
+func CleanName(s string) string {
 	s = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
 			return -1

@@ -126,10 +126,14 @@ func TestInviteJoinFlow(t *testing.T) {
 	if code := join(anon, inv.Code, &j); code != 200 {
 		t.Fatalf("join: %d", code)
 	}
+	p = nil
 	for _, x := range a.Probes() {
-		if x.ID == j.ID && (x.Name != "box" || !x.Trusted || x.Role != hub.RoleChecker) {
-			t.Fatalf("probe from an unnamed trusted invite: %+v", x)
+		if x.ID == j.ID {
+			p = &x
 		}
+	}
+	if p == nil || p.Name != "box" || !p.Trusted || p.Role != hub.RoleChecker {
+		t.Fatalf("probe from an unnamed trusted invite: %+v", p)
 	}
 
 	// Viewers have no business with invites.
@@ -218,9 +222,15 @@ func TestInviteCodeNotLeaked(t *testing.T) {
 	var list struct {
 		Invites []app.Invite `json:"invites"`
 	}
-	json.Unmarshal(raw, &list)
+	if err := json.Unmarshal(raw, &list); err != nil {
+		t.Fatal(err)
+	}
 	if len(list.Invites) != 2 {
 		t.Fatalf("invites: %s", raw)
+	}
+	// The UI tells spent and untrusted invites apart without guessing.
+	if !strings.Contains(string(raw), `"used":true`) || !strings.Contains(string(raw), `"used":false`) || !strings.Contains(string(raw), `"trusted":false`) {
+		t.Fatalf("invites must always say used and trusted: %s", raw)
 	}
 	for _, code := range []string{inv.Code, spent.Code} {
 		if strings.Contains(string(raw), code) {

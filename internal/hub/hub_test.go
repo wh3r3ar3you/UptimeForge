@@ -3103,7 +3103,7 @@ func TestRunOnceRefusesSecretsOnUntrustedChecker(t *testing.T) {
 	out := connect(h)
 	got := h.RunOnce(context.Background(), vpn, []string{"chk"})
 	if len(got) != 1 || got[0].Result == nil || got[0].Result.Status != checks.Down || got[0].Result.Reason != "unavailable" ||
-		!strings.Contains(got[0].Result.Error, "нужен доверенный агент") {
+		got[0].Result.Error != "needs a trusted agent: the check carries secrets" {
 		t.Fatalf("untrusted checker, xray: %+v (result %+v)", got, got[0].Result)
 	}
 	if n := len(out); n != 0 {
@@ -3123,5 +3123,32 @@ func TestRunOnceRefusesSecretsOnUntrustedChecker(t *testing.T) {
 	h.RunOnce(done, vpn, []string{"chk"})
 	if n := len(out); n != 1 {
 		t.Fatalf("a trusted checker got %d messages for xray, want 1", n)
+	}
+}
+
+// "Run from everywhere" (no probes picked) means our own infrastructure: a
+// checker takes part only when it is picked by id.
+func TestRunOnceEverywhereSkipsCheckers(t *testing.T) {
+	h := checkerHub(t, true)
+	outs := map[string]chan []byte{}
+	h.mu.Lock()
+	for _, id := range []string{"chk", "srv"} {
+		outs[id] = make(chan []byte, 16)
+		h.probes[id].conn = &agentConn{assign: make(chan []byte, 1), out: outs[id]}
+	}
+	h.mu.Unlock()
+	done, cancel := context.WithCancel(context.Background())
+	cancel() // each run returns once its request went out
+
+	plain := checks.Spec{Type: "tcp", TCP: &checks.TCPParams{Address: "10.0.0.1:443"}}
+	var probes []string
+	for _, o := range h.RunOnce(done, plain, nil) {
+		probes = append(probes, o.Probe)
+	}
+	if !slices.Equal(probes, []string{"srv"}) || len(outs["chk"]) != 0 || len(outs["srv"]) != 1 {
+		t.Fatalf("run everywhere: outcomes from %v, %d messages to the checker, %d to the server", probes, len(outs["chk"]), len(outs["srv"]))
+	}
+	if got := h.RunOnce(done, plain, []string{"chk"}); len(got) != 1 || len(outs["chk"]) != 1 {
+		t.Fatalf("a checker picked by id: %+v, %d messages", got, len(outs["chk"]))
 	}
 }

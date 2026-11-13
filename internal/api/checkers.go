@@ -91,6 +91,7 @@ func (s *Server) join(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.log.Info("checker joined", "probe", id, "ip", ip, "host", body.Hostname, "os", body.OS+"/"+body.Arch)
+	s.log.Info("checker joined", "probe", id, "ip", ip, "host", app.CleanName(body.Hostname),
+		"os", app.CleanName(body.OS)+"/"+app.CleanName(body.Arch))
 	writeJSON(w, http.StatusOK, map[string]string{"id": id, "token": token})
 }
