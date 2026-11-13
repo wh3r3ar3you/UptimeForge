@@ -419,3 +419,11 @@ func TestFormatAgentUpdateClosedWithoutReturn(t *testing.T) {
 		}
 	}
 }
+
+// A halted agent rollout is resumed on the settings page that shows it.
+func TestLinkAgentUpdateGoesToSettings(t *testing.T) {
+	f := &Formatter{PublicURL: "https://hub.example.com/"}
+	if got := f.Link(&model.Incident{Key: "update:agents"}); got != "https://hub.example.com/settings/general" {
+		t.Fatalf("link %q", got)
+	}
+}

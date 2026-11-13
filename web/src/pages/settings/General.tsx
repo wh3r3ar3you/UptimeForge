@@ -1,10 +1,11 @@
 import {
-  Alert, Badge, Group, NumberInput, SegmentedControl, Select, SimpleGrid, Skeleton, Stack, TagsInput, Text, TextInput,
+  Alert, Anchor, Badge, Button, Divider, Group, NumberInput, Radio, SegmentedControl, Select, SimpleGrid, Skeleton, Stack, TagsInput, Text, TextInput,
 } from '@mantine/core';
-import { IconClockCog, IconRuler2, IconWorld } from '@tabler/icons-react';
+import { IconClockCog, IconPlayerPlay, IconRefreshAlert, IconRuler2, IconWorld } from '@tabler/icons-react';
 import { useEffect, useMemo, useState } from 'react';
-import { type Spec } from '../../api';
-import { PageHeader } from '../../components/Misc';
+import { Link } from 'react-router';
+import { enc, useApiMutation, useRollout, type AgentUpdateMode, type Rollout, type Spec } from '../../api';
+import { notifyError, PageHeader } from '../../components/Misc';
 import { DurationInput, SaveBar, SettingsCard, useSettingsDraft } from '../../components/SettingsKit';
 import { useT } from '../../i18n';
 
@@ -23,6 +24,21 @@ const L = {
     builtin: 'Встроенные цели', custom: 'Свои цели', builtin_hint: 'Смесь российских и зарубежных адресов — так пробы в сетях с белыми списками тоже считаются онлайн.',
     targets: 'Цели host:port', targets_hint: 'TCP-подключение; Enter после каждой', bad_target: 'Нужен формат host:port',
     other_specs: 'Ещё {0} проверок другого типа из конфигурации сохранятся как есть',
+    au: 'Автообновление агентов', au_desc: 'Хаб обновляет агентов до своей версии по этапам: один агент, потом 10 %, потом все. Следующий этап идёт, только когда агенты предыдущего 10 минут работают на новой версии без сбоев.',
+    au_all: 'Все агенты', au_all_hint: 'И агенты на ваших серверах, и пробы проверки',
+    au_checkers: 'Только пробы проверки', au_checkers_hint: 'Агентов на своих серверах обновляете сами',
+    au_off: 'Выключено', au_off_hint: 'Хаб никого не обновляет',
+    st_dev: 'Это dev-сборка хаба: обновления агентов для неё выключены. Раскатка идёт только с релизных версий.',
+    st_off: 'Автообновление выключено: агенты остаются на своих версиях.',
+    st_target: 'Целевая версия', st_stage: 'Этап', st_updated: 'Обновлено', st_of: '{0} из {1}', st_pending: 'ждут очереди: {0}',
+    stage_0: 'ещё не начиналась', stage_1: '1 — один агент', stage_2: '2 — 10 % агентов', stage_3: '3 — все агенты', st_done: 'Готово',
+    st_halted: 'Раскатка остановлена',
+    st_halted_desc: 'Агенты ниже не вернулись на новую версию — она не запустилась или запускатель её откатил. Остальным агентам версия не уйдёт, пока раскатку не продолжат. Проверьте эти серверы и нажмите «Продолжить»: им эту версию больше не отправят, остальным раскатка пойдёт дальше.',
+    st_resume: 'Продолжить',
+    st_in_flight: 'Обновляются сейчас', st_failed: 'Не обновились', st_failed_hint: 'Эту версию им больше не отправят',
+    st_reinstall: 'Обновить вручную или переустановить',
+    st_reinstall_hint: 'Эти агенты запущены без запускателя (старая установка или роутер) и сами не обновляются. Это не сбой: обновите бинарник вручную или переустановите агента.',
+    st_error: 'Не удалось получить статус раскатки',
   },
   en: {
     title: 'General settings', subtitle: 'Time, language, hub address and check defaults',
@@ -38,6 +54,21 @@ const L = {
     builtin: 'Built-in targets', custom: 'Custom targets', builtin_hint: 'A mix of Russian and foreign addresses, so probes on whitelist-only networks still count as online.',
     targets: 'host:port targets', targets_hint: 'A TCP connect; press Enter after each', bad_target: 'Use host:port',
     other_specs: '{0} more checks of other types from the config file are kept as they are',
+    au: 'Agent auto-update', au_desc: 'The hub updates agents to its own version in stages: one agent, then 10%, then everyone. The next stage goes out only once the agents of the last one have run the new version for 10 minutes without a break.',
+    au_all: 'All agents', au_all_hint: 'Agents on your servers and checker probes alike',
+    au_checkers: 'Checker probes only', au_checkers_hint: 'You update the agents on your own servers yourself',
+    au_off: 'Off', au_off_hint: 'The hub updates no one',
+    st_dev: 'This is a development build of the hub: updates are off for development builds. Rollouts come only from release versions.',
+    st_off: 'Auto-update is off: agents stay on their versions.',
+    st_target: 'Target version', st_stage: 'Stage', st_updated: 'Updated', st_of: '{0} of {1}', st_pending: 'waiting their turn: {0}',
+    stage_0: 'not started yet', stage_1: '1 — one agent', stage_2: '2 — 10% of agents', stage_3: '3 — everyone', st_done: 'Done',
+    st_halted: 'The rollout is halted',
+    st_halted_desc: 'The agents below did not come back on the new version: it did not start, or the launcher rolled it back. No other agent gets it until the rollout is resumed. Look at these servers, then press Resume: they are not sent this version again, and the rollout goes on for the rest.',
+    st_resume: 'Resume',
+    st_in_flight: 'Updating now', st_failed: 'Did not update', st_failed_hint: 'They are not sent this version again',
+    st_reinstall: 'Update by hand or reinstall',
+    st_reinstall_hint: 'These agents run without the launcher (an older install, or a router) and cannot update themselves. Nothing is broken: replace the binary by hand or reinstall the agent.',
+    st_error: 'Could not load the rollout status',
   },
 };
 
@@ -67,6 +98,111 @@ function isBuiltin(b: Spec[] | null) {
   if (b == null) return true;
   const tcp = b.filter((s) => s.type === 'tcp' && s.tcp);
   return tcp.length === b.length && tcp.length === BUILTIN.length && tcp.every((s, i) => s.tcp!.address === BUILTIN[i]);
+}
+
+const MODES: AgentUpdateMode[] = ['all', 'checkers', 'off'];
+
+/** ProbeList names probes (linked to their pages) as badges. */
+function ProbeList({ ids, names }: { ids: string[]; names: Rollout['names'] }) {
+  return (
+    <Group gap={6}>
+      {ids.map((id) => (
+        <Badge key={id} variant="default" size="lg" styles={{ root: { textTransform: 'none', fontWeight: 500 } }}>
+          <Anchor component={Link} to={`/probes/${enc(id)}`} inherit c="inherit">{names[id] || id}</Anchor>
+        </Badge>
+      ))}
+    </Group>
+  );
+}
+
+/**
+ * RolloutStatus is the live agent-update rollout under the mode setting:
+ * outside the card's fieldset, so Resume works even when the section is
+ * managed by config.yaml. It shows the saved mode, not the draft.
+ */
+function RolloutStatus() {
+  const t = useT(L);
+  const q = useRollout();
+  const resume = useApiMutation<void, Rollout>('POST', () => '/api/v1/agents/rollout/resume');
+  const r = q.data;
+  let body;
+  if (q.isError) body = <Alert color="red" title={t('st_error')}>{q.error.message}</Alert>;
+  else if (!r) body = <Skeleton h={60} radius="md" />;
+  else if (!r.release) body = <Text size="sm" c="dimmed">{t('st_dev')}</Text>;
+  else if (r.mode === 'off') body = <Text size="sm" c="dimmed">{t('st_off')}</Text>;
+  else {
+    const total = r.updated + r.pending + r.in_flight.length + r.failed.length + r.need_reinstall.length;
+    body = (
+      <Stack gap="md">
+        <Group gap="xl" align="flex-start">
+          <Stack gap={2}>
+            <Text size="xs" c="dimmed">{t('st_target')}</Text>
+            <Text fw={600} ff="monospace">{r.version}</Text>
+          </Stack>
+          <Stack gap={2}>
+            <Text size="xs" c="dimmed">{t('st_stage')}</Text>
+            <Group gap={8}>
+              {(r.stage > 0 || !r.done) && <Text fw={600}>{t(`stage_${Math.min(Math.max(r.stage, 0), 3)}` as 'stage_0')}</Text>}
+              {r.done && <Badge color="teal" variant="light">{t('st_done')}</Badge>}
+            </Group>
+          </Stack>
+          <Stack gap={2}>
+            <Text size="xs" c="dimmed">{t('st_updated')}</Text>
+            <Group gap={8}>
+              <Text fw={600}>{t('st_of', r.updated, total)}</Text>
+              {r.pending > 0 && <Text size="sm" c="dimmed">{t('st_pending', r.pending)}</Text>}
+            </Group>
+          </Stack>
+        </Group>
+        {r.halted && (
+          <Alert color="orange" icon={<IconRefreshAlert size={18} />} title={t('st_halted')}>
+            <Stack gap="sm" align="flex-start">
+              <Text size="sm">{t('st_halted_desc')}</Text>
+              <Button
+                size="xs"
+                color="orange"
+                leftSection={<IconPlayerPlay size={14} />}
+                loading={resume.isPending}
+                onClick={() => resume.mutate(undefined, { onError: notifyError })}
+              >
+                {t('st_resume')}
+              </Button>
+            </Stack>
+          </Alert>
+        )}
+        {r.in_flight.length > 0 && (
+          <Stack gap={6}>
+            <Text size="sm" fw={500}>{t('st_in_flight')}</Text>
+            <ProbeList ids={r.in_flight} names={r.names} />
+          </Stack>
+        )}
+        {r.failed.length > 0 && (
+          <Stack gap={6}>
+            <div>
+              <Text size="sm" fw={500}>{t('st_failed')}</Text>
+              <Text size="xs" c="dimmed">{t('st_failed_hint')}</Text>
+            </div>
+            {r.failed.map((f) => (
+              <Group key={f.probe} gap={8} wrap="nowrap" align="baseline">
+                <ProbeList ids={[f.probe]} names={r.names} />
+                <Text size="sm" c="dimmed" style={{ wordBreak: 'break-word' }}>{f.error}</Text>
+              </Group>
+            ))}
+          </Stack>
+        )}
+        {r.need_reinstall.length > 0 && (
+          <Stack gap={6}>
+            <div>
+              <Text size="sm" fw={500}>{t('st_reinstall')}</Text>
+              <Text size="xs" c="dimmed">{t('st_reinstall_hint')}</Text>
+            </div>
+            <ProbeList ids={r.need_reinstall} names={r.names} />
+          </Stack>
+        )}
+      </Stack>
+    );
+  }
+  return (<><Divider />{body}</>);
 }
 
 export default function General() {
@@ -239,6 +375,14 @@ export default function General() {
               {otherSpecs.length > 0 && <Text size="xs" c="dimmed">{t('other_specs', otherSpecs.length)}</Text>}
             </Stack>
           )}
+        </SettingsCard>
+
+        <SettingsCard icon={IconRefreshAlert} title={t('au')} description={t('au_desc')} managed={g} footer={<RolloutStatus />}>
+          <Radio.Group value={draft.agent_update || 'all'} onChange={(v) => update((d) => { d.agent_update = v as AgentUpdateMode; })}>
+            <Stack gap="sm">
+              {MODES.map((m) => <Radio key={m} value={m} label={t(`au_${m}`)} description={t(`au_${m}_hint`)} disabled={g} />)}
+            </Stack>
+          </Radio.Group>
         </SettingsCard>
 
         <SaveBar dirty={s.dirty} saving={s.saving} onSave={s.save} onReset={s.reset} />

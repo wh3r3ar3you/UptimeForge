@@ -617,7 +617,7 @@ func (f *Formatter) Link(inc *model.Incident) string {
 	case strings.HasPrefix(inc.Key, "rw:"):
 		return base + "/remnawave"
 	case strings.HasPrefix(inc.Key, "update:"):
-		return base + "/incidents"
+		return base + "/settings/general" // the rollout status and its Resume
 	}
 	return base + "/checks/" + url.PathEscape(inc.Key)
 }

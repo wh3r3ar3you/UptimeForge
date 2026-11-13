@@ -32,6 +32,7 @@ type Server struct {
 	trust        trust    // which proxies' X-Forwarded-* count
 	metricsToken string
 	agentSums    agentSums // sha256 of the agent binaries, for checksums.txt
+	rollout      rolloutControl
 
 	trafficMu sync.Mutex
 	traffic   map[string]store.Traffic // last 24h per probe, cached for a minute
@@ -58,7 +59,7 @@ type Options struct {
 func New(a *app.App, opt Options) *Server {
 	s := &Server{app: a, log: a.Log, ui: opt.UI, agentDir: opt.AgentDir, limiter: newLimiter(10, time.Minute),
 		setupToken: opt.SetupToken, setupLimit: newLimiter(10, time.Minute), userLimit: newLimiter(10, 5*time.Minute), bearerLimit: newLimiter(10, time.Minute),
-		joinLimit: newLimiter(10, time.Minute), trust: newTrust(opt.TrustedProxies), metricsToken: opt.MetricsToken}
+		joinLimit: newLimiter(10, time.Minute), trust: newTrust(opt.TrustedProxies), metricsToken: opt.MetricsToken, rollout: a.Hub}
 	s.announceSetup()
 	return s
 }
@@ -106,6 +107,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/checkers/invites", admin(s.listInvites))
 	mux.Handle("DELETE /api/v1/checkers/invites/{id}", admin(s.revokeInvite))
 	mux.HandleFunc("POST /api/agent/join", s.join)
+	mux.Handle("GET /api/v1/agents/rollout", admin(s.getRollout))
+	mux.Handle("POST /api/v1/agents/rollout/resume", admin(s.resumeRollout))
 
 	mux.Handle("GET /api/v1/incidents", view(s.listIncidents))
 	mux.Handle("POST /api/v1/incidents/{id}/ack", admin(s.ackIncident))

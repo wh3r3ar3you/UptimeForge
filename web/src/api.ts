@@ -177,6 +177,8 @@ export interface Overview {
 
 export interface HubConfig {
   public_url?: string; timezone?: string; lang?: string; region_label?: string; offline_grace?: string;
+  /** Which agents the hub updates to its own version; empty means all. */
+  agent_update?: AgentUpdateMode | '';
   heartbeat: { url?: string; interval?: string };
   defaults: { interval?: string; timeout?: string; retries?: number };
   baseline: Spec[] | null;
@@ -188,6 +190,23 @@ export interface HubConfig {
 }
 
 export interface Settings { config: HubConfig; managed: Record<string, boolean> }
+
+export type AgentUpdateMode = 'all' | 'checkers' | 'off';
+/** The agent-update rollout (internal/hub/rollout.go RolloutStatus + internal/api RolloutView). */
+export interface Rollout {
+  version: string; mode: AgentUpdateMode;
+  /** 1 one agent, 2 10%, 3 everyone; 0 before the first. */
+  stage: number;
+  updated: number; pending: number; in_flight: string[];
+  failed: { probe: string; error: string }[];
+  halted: boolean; done: boolean;
+  /** Agents not under the launcher: updated by hand or reinstalled. */
+  need_reinstall: string[];
+  /** Display names by probe ID; a probe without one is missing. */
+  names: Record<string, string>;
+  /** False for a development build of the hub: it updates no agents. */
+  release: boolean;
+}
 
 export interface User { id: number; username: string; role: 'admin' | 'viewer'; created: string }
 
@@ -431,6 +450,8 @@ export const INCIDENT_PAGE = 100;
 export const useIncidents = () =>
   useQuery({ queryKey: ['incidents'], queryFn: () => api<IncidentList>('GET', '/api/v1/incidents'), refetchInterval: LIVE });
 export const useSettings = () => useQuery({ queryKey: ['settings'], queryFn: () => api<Settings>('GET', '/api/v1/settings') });
+export const useRollout = () =>
+  useQuery({ queryKey: ['rollout'], queryFn: () => api<Rollout>('GET', '/api/v1/agents/rollout'), refetchInterval: 10_000 });
 export const useRemnawave = (o?: Live) =>
   useQuery({ queryKey: ['remnawave'], queryFn: () => api<RemnawaveView>('GET', '/api/v1/remnawave'), ...cadence(o, 30_000) });
 /** q is a window from useWindow. */

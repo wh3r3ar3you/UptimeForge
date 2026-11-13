@@ -53,7 +53,9 @@ sha256() {
   fi
 }
 
-[ -d /opt/bin ] && [ ! -d /usr/local/bin ] && BIN=/opt/bin/uptimeforge-agent # Entware
+systemd=""
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then systemd=1; fi
+[ -z "$systemd" ] && [ -d /opt/bin ] && [ ! -d /usr/local/bin ] && BIN=/opt/bin/uptimeforge-agent # Entware
 mkdir -p "$(dirname "$BIN")"
 name="uptimeforge-agent_linux_$arch"
 tmp="$(mktemp)"
@@ -80,7 +82,9 @@ echo "sha256 OK: $got"
 chmod 0755 "$tmp"
 mv "$tmp" "$BIN"
 
-if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+if [ -n "$systemd" ]; then
+  # The launcher runs the agent and installs the hub's signed updates under
+  # $STATE_DIR/bin (StateDirectory: owned by the service user, exec allowed).
   id uptimeforge >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin uptimeforge
   umask 077
   mkdir -p /etc/uptimeforge
@@ -100,7 +104,7 @@ Wants=network-online.target
 
 [Service]
 EnvironmentFile=/etc/uptimeforge/agent.env
-ExecStart=$BIN
+ExecStart=/usr/local/bin/uptimeforge-agent launch
 User=uptimeforge
 Restart=always
 RestartSec=5
@@ -121,6 +125,7 @@ UNIT
 fi
 
 # No systemd: Entware (/opt/etc/init.d) or plain init.d (OpenWrt).
+# No launcher here: the state dir is on flash, and the updates it keeps (two more 10-20 MB binaries) would wear and fill it.
 initdir=/etc/init.d
 [ -d /opt/etc/init.d ] && initdir=/opt/etc/init.d
 # /var is tmpfs on OpenWrt: keep the token on flash (Entware lives on /opt).

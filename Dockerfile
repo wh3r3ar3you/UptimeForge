@@ -76,9 +76,12 @@ ENTRYPOINT ["uptimeforge-hub"]
 
 FROM base AS agent
 COPY --from=build /out/uptimeforge-agent /usr/local/bin/
-# The token obtained with an invite code lives in a volume mounted here: a new
-# named volume takes the owner of this directory.
+# The token obtained with an invite code and the updates the launcher installs
+# (bin/) live in a volume mounted here: a new named volume takes the owner of
+# this directory.
 RUN mkdir /state && chown uptimeforge /state
 ENV UF_STATE_DIR=/state
 USER uptimeforge
-ENTRYPOINT ["uptimeforge-agent"]
+VOLUME /state
+# The launcher runs the agent as its child and swaps in the hub's signed updates.
+ENTRYPOINT ["uptimeforge-agent", "launch"]

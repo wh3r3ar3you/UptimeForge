@@ -14,7 +14,12 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -870,5 +875,171 @@ func TestViewerDoesNotSeeAgentIP(t *testing.T) {
 	}
 	if n, _ := network(admin, "/api/v1/overview"); n == nil || n.IP != "203.0.113.7" {
 		t.Errorf("admin overview: network %+v", n)
+	}
+}
+
+// A systemd agent starts through the launcher so the hub can update it;
+// routers keep running the agent itself (their state dir is on flash).
+func TestInstallScriptUsesLauncher(t *testing.T) {
+	s, _ := startHubWith(t, Options{})
+	r := httptest.NewRequest("GET", "/install.sh", nil)
+	r.Host = "hub.example.com"
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	script := w.Body.String()
+	for _, want := range []string{"ExecStart=/usr/local/bin/uptimeforge-agent launch", "UF_STATE_DIR", "StateDirectory=uptimeforge-agent"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script lacks %q", want)
+		}
+	}
+	_, noSystemd, ok := strings.Cut(script, "# No systemd")
+	if !ok {
+		t.Fatal("no OpenWrt/Entware branch in the script")
+	}
+	starts := 0
+	for _, line := range strings.Split(noSystemd, "\n") {
+		if strings.Contains(line, "start)") {
+			starts++
+			if strings.Contains(line, "launch") {
+				t.Errorf("a router starts the agent through the launcher: %s", line)
+			}
+		}
+	}
+	if starts == 0 {
+		t.Error("the init script has no start")
+	}
+	if sh, err := exec.LookPath("sh"); err == nil {
+		f := filepath.Join(t.TempDir(), "install.sh")
+		os.WriteFile(f, []byte(script), 0o644)
+		if out, err := exec.Command(sh, "-n", f).CombinedOutput(); err != nil {
+			t.Fatalf("script does not parse: %v\n%s", err, out)
+		}
+	}
+}
+
+// The launcher keeps installed updates under /state: every Docker form the
+// hub hands out keeps it in a named volume, so an update survives a
+// container recreate.
+func TestComposeHasStateVolume(t *testing.T) {
+	check := func(name, compose, mem string) {
+		t.Helper()
+		var f struct {
+			Services map[string]struct {
+				ReadOnly    bool              `yaml:"read_only"`
+				MemLimit    string            `yaml:"mem_limit"`
+				Environment map[string]string `yaml:"environment"`
+				Volumes     []string          `yaml:"volumes"`
+			} `yaml:"services"`
+			Volumes map[string]any `yaml:"volumes"`
+		}
+		if err := yaml.Unmarshal([]byte(compose), &f); err != nil {
+			t.Fatalf("%s: compose is not valid YAML: %v\n%s", name, err, compose)
+		}
+		a := f.Services["uptimeforge-agent"]
+		if a.Environment["UF_STATE_DIR"] != "/state" {
+			t.Errorf("%s: environment %+v", name, a.Environment)
+		}
+		if !slices.Contains(a.Volumes, "uptimeforge-agent-state:/state") {
+			t.Errorf("%s: volumes %v", name, a.Volumes)
+		}
+		if _, ok := f.Volumes["uptimeforge-agent-state"]; !ok {
+			t.Errorf("%s: no top-level volume: %+v", name, f.Volumes)
+		}
+		if !a.ReadOnly || a.MemLimit != mem {
+			t.Errorf("%s: read_only %v, mem_limit %q, want %q", name, a.ReadOnly, a.MemLimit, mem)
+		}
+	}
+	in := (&Server{}).installFor("https://hub.example.com", "tok-en_123")
+	check("install", in.Compose, "512m")
+	if !strings.Contains(in.Docker, "-v uptimeforge-agent-state:/state ") {
+		t.Errorf("docker one-liner keeps no /state: %s", in.Docker)
+	}
+
+	_, rest, _ := strings.Cut(joinScriptText, "<<COMPOSE\n")
+	compose, _, ok := strings.Cut(rest, "\nCOMPOSE\n")
+	if !ok {
+		t.Fatal("no compose heredoc in join.sh")
+	}
+	compose = strings.NewReplacer("$env_extra\n", "", "$IMAGE", "img", "$UF_HUB", "https://hub", "$CODE", "code").Replace(compose + "\n")
+	check("join.sh", compose, "256m")
+}
+
+type fakeRollout struct {
+	mu      sync.Mutex
+	st      hub.RolloutStatus
+	resumed []string
+}
+
+func (f *fakeRollout) Rollout() hub.RolloutStatus {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.st
+}
+
+func (f *fakeRollout) ResumeRollout(by string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resumed = append(f.resumed, by)
+	f.st.Halted = false
+}
+
+func (f *fakeRollout) resumedBy() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.resumed)
+}
+
+// The agent rollout is for admins: a viewer neither reads nor resumes it.
+// An admin's resume is the hub's, under the admin's name.
+func TestRolloutAPI(t *testing.T) {
+	s, _ := startHubWith(t, Options{})
+	fake := &fakeRollout{st: hub.RolloutStatus{Version: "0.2.0", Mode: "all", Stage: 2, Updated: 3,
+		InFlight: []string{"edge"}, Failed: []hub.RolloutFailure{{Probe: "home", Error: "the update to 0.2.0 was rolled back"}},
+		Halted: true, NeedReinstall: []string{"router"}}}
+	s.rollout = fake
+	srv := httptest.NewServer(s.Handler()) // after the fake is in place
+	defer srv.Close()
+	admin := newClient(t, srv.URL)
+	setupAdmin(admin)
+	for _, p := range []map[string]any{{"id": "edge", "name": "Edge FI", "role": "checker"}, {"id": "home", "name": "Home", "role": "checker"}} {
+		if code := admin.do("POST", "/api/v1/probes", p, nil); code != 201 {
+			t.Fatalf("create probe %v: %d", p["id"], code)
+		}
+	}
+	viewer := viewerClient(admin)
+	if code := viewer.do("GET", "/api/v1/agents/rollout", nil, nil); code != 403 {
+		t.Errorf("viewer status: %d", code)
+	}
+	if code := viewer.do("POST", "/api/v1/agents/rollout/resume", nil, nil); code != 403 {
+		t.Errorf("viewer resume: %d", code)
+	}
+	if got := fake.resumedBy(); len(got) != 0 {
+		t.Fatalf("a viewer resumed the rollout: %v", got)
+	}
+
+	type status struct {
+		hub.RolloutStatus
+		Names   map[string]string `json:"names"`
+		Release bool              `json:"release"`
+	}
+	var st status
+	if code := admin.do("GET", "/api/v1/agents/rollout", nil, &st); code != 200 {
+		t.Fatalf("admin status: %d", code)
+	}
+	if st.Version != "0.2.0" || st.Stage != 2 || !st.Halted || len(st.Failed) != 1 || st.Failed[0].Error == "" ||
+		!slices.Equal(st.InFlight, []string{"edge"}) || !slices.Equal(st.NeedReinstall, []string{"router"}) || !st.Release {
+		t.Errorf("status %+v", st)
+	}
+	if st.Names["edge"] != "Edge FI" || st.Names["home"] != "Home" {
+		t.Errorf("names %v", st.Names)
+	}
+	if code := admin.do("POST", "/api/v1/agents/rollout/resume", nil, &st); code != 200 {
+		t.Fatalf("admin resume: %d", code)
+	}
+	if got := fake.resumedBy(); !slices.Equal(got, []string{"leo"}) {
+		t.Errorf("resumed by %v, want [leo]", got)
+	}
+	if st.Halted {
+		t.Errorf("resume answers the status before the resume: %+v", st)
 	}
 }

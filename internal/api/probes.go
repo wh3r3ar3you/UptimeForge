@@ -142,6 +142,8 @@ const ReleasesURL = "https://github.com/wh3r3ar3you/uptimeforge/releases/downloa
 // composeFile runs the agent next to whatever else the server does: on the
 // host's network so the probe sees the world from there (it changes no routes
 // and listens on no ports), without privileges and with bounded resources.
+// The launcher keeps the updates it installs in the /state volume, the one
+// writable place, so they outlive the container.
 func composeFile(hubURL, token string) string {
 	return fmt.Sprintf(`services:
   uptimeforge-agent:
@@ -158,6 +160,11 @@ func composeFile(hubURL, token string) string {
     environment:
       UF_HUB: %s
       UF_TOKEN: %s
+      UF_STATE_DIR: /state
+    volumes:
+      - uptimeforge-agent-state:/state
+volumes:
+  uptimeforge-agent-state:
 `, agentImageFor(version.Version), strconv.Quote(hubURL), strconv.Quote(token))
 }
 
@@ -190,7 +197,7 @@ func (s *Server) installCommands(hubURL, token string) *Install {
 		ComposeCmd: "mkdir -p /opt/uptimeforge-agent && cd /opt/uptimeforge-agent && cat > compose.yml <<'EOF'\n" + compose + "EOF\ndocker compose up -d",
 		Script: fmt.Sprintf("curl -fsSL %s | sudo UF_HUB=%s UF_TOKEN=%s sh",
 			shellWord(hubURL+"/install.sh"), shellWord(hubURL), shellWord(token)),
-		Docker: fmt.Sprintf("docker run -d --name uptimeforge-agent --restart unless-stopped --network host -e UF_HUB=%s -e UF_TOKEN=%s %s",
+		Docker: fmt.Sprintf("docker run -d --name uptimeforge-agent --restart unless-stopped --network host -v uptimeforge-agent-state:/state -e UF_HUB=%s -e UF_TOKEN=%s %s",
 			shellWord(hubURL), shellWord(token), agentImageFor(version.Version)),
 		Binary: fmt.Sprintf("uptimeforge-agent --hub %s --token %s", shellWord(hubURL), shellWord(token)),
 	}
