@@ -99,6 +99,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/probes/{id}", admin(s.deleteProbe))
 	mux.Handle("POST /api/v1/probes/{id}/token", admin(s.rotateToken))
 	mux.Handle("GET /api/v1/probes/{id}/metrics", view(s.probeMetrics))
+	mux.Handle("GET /api/v1/probes/{id}/live", view(s.liveStream))
 	mux.Handle("GET /api/v1/sparklines", view(s.sparklines))
 
 	mux.Handle("POST /api/v1/checkers/invites", admin(s.createInvite))

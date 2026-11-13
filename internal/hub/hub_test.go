@@ -3663,3 +3663,29 @@ func TestWatchEndsWithHub(t *testing.T) {
 		t.Fatalf("renewal ticker stopped %d times, want 1", r.stops.Load())
 	}
 }
+
+// Watchers counts the open streams of a probe, so callers (and tests) can
+// see that a closed stream was really unsubscribed.
+func TestWatchersCount(t *testing.T) {
+	r := newLiveRig(t)
+	if n := r.h.Watchers("srv"); n != 0 {
+		t.Fatalf("Watchers before any Watch = %d", n)
+	}
+	_, stop1, _ := r.h.Watch("srv")
+	_, stop2, _ := r.h.Watch("srv")
+	if n := r.h.Watchers("srv"); n != 2 {
+		t.Fatalf("Watchers = %d, want 2", n)
+	}
+	stop1()
+	stop1()
+	if n := r.h.Watchers("srv"); n != 1 {
+		t.Fatalf("Watchers after one stop = %d, want 1", n)
+	}
+	stop2()
+	if n := r.h.Watchers("srv"); n != 0 {
+		t.Fatalf("Watchers after both stops = %d, want 0", n)
+	}
+	if n := r.h.Watchers("nope"); n != 0 {
+		t.Fatalf("Watchers of an unknown probe = %d", n)
+	}
+}

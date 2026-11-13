@@ -218,3 +218,13 @@ func (h *Hub) localNext(probeID string) time.Duration {
 	}
 	return localMetricsInt
 }
+
+// Watchers is how many streams are open on probeID right now.
+func (h *Hub) Watchers(probeID string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if p := h.probes[probeID]; p != nil {
+		return len(p.watchers)
+	}
+	return 0
+}
