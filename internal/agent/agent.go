@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -60,6 +61,9 @@ type Agent struct {
 	log    *slog.Logger
 	runner *runner.Runner
 	sys    *sysmon.Collector
+	// metricsOff is set when the hub's assignment says Metrics=false: no
+	// metrics or sysinfo are sent (nor collected) until it says otherwise.
+	metricsOff atomic.Bool
 
 	mu      sync.Mutex
 	pending []checks.Result
@@ -164,6 +168,9 @@ func (a *Agent) collect(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+		if a.metricsOff.Load() {
+			continue
+		}
 		m := a.sys.Collect(ctx)
 		a.mu.Lock()
 		a.metrics = append(a.metrics, sample{m, time.Now()})
@@ -236,12 +243,6 @@ func (a *Agent) session(ctx context.Context) error {
 	if err := conn.Write(ctx, websocket.MessageText, hello); err != nil {
 		return err
 	}
-	if a.sys != nil {
-		info, _ := proto.Encode(proto.TypeSysInfo, a.sys.Info(ctx))
-		if err := conn.Write(ctx, websocket.MessageText, info); err != nil {
-			return err
-		}
-	}
 	a.log.Info("connected to hub", "url", WSURL(a.cfg.HubURL))
 
 	errc := make(chan error, 2)
@@ -252,7 +253,15 @@ func (a *Agent) session(ctx context.Context) error {
 	return err
 }
 
+// sendSysInfo describes the host to the hub. It waits for the first
+// assignment of a session, which may say the hub does not want host data.
+func (a *Agent) sendSysInfo(ctx context.Context, conn *websocket.Conn) error {
+	info, _ := proto.Encode(proto.TypeSysInfo, a.sys.Info(ctx))
+	return conn.Write(ctx, websocket.MessageText, info)
+}
+
 func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
+	sysSent := false
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -270,6 +279,20 @@ func (a *Agent) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			}
 			if err := a.runner.Apply(as); err != nil {
 				a.log.Error("upstream proxy for this probe is broken", "err", err)
+			}
+			off := as.Metrics != nil && !*as.Metrics
+			if was := a.metricsOff.Swap(off); was != off {
+				a.log.Info("host metrics switched by the hub", "off", off)
+			}
+			if off {
+				a.mu.Lock()
+				a.metrics = nil
+				a.mu.Unlock()
+			} else if a.sys != nil && !sysSent {
+				sysSent = true
+				if err := a.sendSysInfo(ctx, conn); err != nil {
+					return err
+				}
 			}
 			a.log.Info("assignment received", "probe", as.Probe, "checks", len(as.Checks))
 		case proto.TypeRun:
@@ -352,6 +375,9 @@ func (a *Agent) flush(write func([]byte) error) error {
 	batch, metrics := a.pending, a.metrics
 	a.pending, a.metrics = nil, nil
 	a.mu.Unlock()
+	if a.metricsOff.Load() {
+		metrics = nil
+	}
 	for i, sm := range metrics {
 		sm.m.Age = time.Since(sm.at).Seconds()
 		msg, _ := proto.Encode(proto.TypeMetrics, sm.m)

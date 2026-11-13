@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/wh3r3ar3you/uptimeforge/internal/checks"
 	"github.com/wh3r3ar3you/uptimeforge/internal/proto"
 )
@@ -239,5 +241,60 @@ func TestLocalAddrsArePublic(t *testing.T) {
 		if ip == nil || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
 			t.Fatalf("not public: %s", s)
 		}
+	}
+}
+
+// Assign.Metrics=false stops metrics and sysinfo; nil (an older hub) keeps
+// sending them.
+func TestAssignMetricsOff(t *testing.T) {
+	off := false
+	for name, flag := range map[string]*bool{"nil": nil, "false": &off} {
+		t.Run(name, func(t *testing.T) {
+			var seen sync.Map
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				c, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer c.CloseNow()
+				msg, _ := proto.Encode(proto.TypeAssign, proto.Assign{Probe: "p", Metrics: flag})
+				c.Write(r.Context(), websocket.MessageText, msg)
+				for {
+					_, data, err := c.Read(r.Context())
+					if err != nil {
+						return
+					}
+					var env proto.Envelope
+					json.Unmarshal(data, &env)
+					seen.Store(env.Type, true)
+				}
+			}))
+			defer srv.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			a := New(ctx, Config{HubURL: srv.URL, Token: "t", MetricsInterval: 30 * time.Millisecond}, slog.New(slog.DiscardHandler))
+			done := make(chan struct{})
+			go func() { a.Run(ctx); close(done) }()
+			has := func(k string) bool { _, ok := seen.Load(k); return ok }
+			if flag == nil {
+				deadline := time.Now().Add(5 * time.Second)
+				for !(has(proto.TypeMetrics) && has(proto.TypeSysInfo)) && time.Now().Before(deadline) {
+					time.Sleep(20 * time.Millisecond)
+				}
+				if !has(proto.TypeMetrics) || !has(proto.TypeSysInfo) {
+					t.Fatal("metrics and sysinfo must flow without the flag")
+				}
+			} else {
+				deadline := time.Now().Add(5 * time.Second)
+				for !has(proto.TypeHello) && time.Now().Before(deadline) {
+					time.Sleep(20 * time.Millisecond)
+				}
+				time.Sleep(500 * time.Millisecond) // many metrics periods
+				if has(proto.TypeMetrics) || has(proto.TypeSysInfo) {
+					t.Fatal("metrics or sysinfo sent after the hub switched them off")
+				}
+			}
+			cancel()
+			<-done
+		})
 	}
 }

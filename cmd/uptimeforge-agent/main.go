@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -40,12 +41,15 @@ func main() {
 	nics := flag.String("nic", os.Getenv("UF_NIC"), "comma-separated interfaces counted as traffic; default: all physical (env UF_NIC)")
 	src := flag.String("source-ip", os.Getenv("UF_SOURCE_IP"), "local address to reach the hub from; empty tries the host's public addresses in turn when the hub is unreachable, \"off\" never does (env UF_SOURCE_IP)")
 	insecure := flag.Bool("insecure", os.Getenv("UF_INSECURE") == "1", "allow a hub over plain http/ws beyond loopback: the token and checks then cross the network in clear text (env UF_INSECURE=1)")
+	join := flag.String("join", os.Getenv("UF_JOIN"), "one-time invite code from the hub: exchanged for a token that is saved in --state-dir (env UF_JOIN)")
+	stateDir := flag.String("state-dir", envOr("UF_STATE_DIR", agent.DefaultStateDir), "where the token obtained with --join is kept (env UF_STATE_DIR)")
 	deny := flag.String("deny-types", os.Getenv("UF_DENY_TYPES"), "comma-separated check types this probe refuses to run whatever the hub assigns, e.g. docker,real-browser,system-service (env UF_DENY_TYPES)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	if *hubURL == "" || *token == "" {
+	if *hubURL == "" || (*token == "" && *join == "" && !hasSavedToken(*stateDir)) {
 		fmt.Fprintln(os.Stderr, "usage: uptimeforge-agent --hub https://hub.example.com --token TOKEN")
+		fmt.Fprintln(os.Stderr, "       uptimeforge-agent --hub https://hub.example.com --join INVITE-CODE [--state-dir DIR]")
 		fmt.Fprintln(os.Stderr, "       uptimeforge-agent check <vless://…|https://…|host:port> [--via socks5://…]")
 		os.Exit(2)
 	}
@@ -55,6 +59,18 @@ func main() {
 	if *src != "" && *src != "auto" && *src != "off" && net.ParseIP(*src) == nil {
 		fmt.Fprintln(os.Stderr, "--source-ip must be an IP address, auto or off")
 		os.Exit(2)
+	}
+	if *token == "" { // an explicit token wins over the invite code
+		if err := agent.CheckHubURL(*hubURL, *insecure); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		tok, err := agent.Enroll(ctx, *hubURL, *join, *stateDir)
+		if err != nil {
+			log.Error("cannot join the hub", "err", err)
+			os.Exit(1)
+		}
+		*token = tok
 	}
 	cfg := agent.Config{HubURL: *hubURL, Token: *token, MetricsInterval: *metrics, SourceIP: *src, Insecure: *insecure}
 	if *metrics == 0 {
@@ -159,6 +175,18 @@ func printResult(s *checks.Spec, r checks.Result) {
 	for k, v := range r.Info {
 		fmt.Printf("   %-9s %s\n", k+":", v)
 	}
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+func hasSavedToken(dir string) bool {
+	b, err := os.ReadFile(filepath.Join(dir, "token"))
+	return err == nil && strings.TrimSpace(string(b)) != ""
 }
 
 func envDuration(k string, def time.Duration) time.Duration {
