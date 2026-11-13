@@ -15,6 +15,31 @@ import (
 	"github.com/wh3r3ar3you/uptimeforge/internal/version"
 )
 
+// The launcher never updates itself: it is the binary the agent was
+// installed with (the Docker image, the systemd unit's binary), and it keeps
+// running whatever version it starts. So its contract with the agents it
+// starts is frozen; a future agent must keep honouring it, and a future
+// launcher must keep offering it:
+//
+//   - the child runs with UF_LAUNCHER=1 (it may install updates) and
+//     UF_LAUNCHER_BUILTIN=<launcher version> (it refuses a version this
+//     launcher would not select: not newer than the builtin);
+//   - exit code 75 (ExitRestart) means "an update is installed: choose again
+//     and start at once"; any other exit is restarted with a backoff;
+//   - connected-<version> in the state dir, written by that version once the
+//     hub has assigned it work, ends its health watch; without it within
+//     HealthWait the version is marked bad;
+//   - the state dir layout (install.go): bin/<version>/uptimeforge-agent,
+//     current, previous, bad, connected-<version>.
+//
+// Manual rollback: append the version to <state>/bad (or delete
+// <state>/current) and restart the agent; Choose then picks the previous
+// version, else the builtin.
+//
+// Only launcher installs update themselves (Docker, systemd). A plain binary
+// started by hand, Windows and macOS installs and OpenWrt/Entware (no
+// launcher: flash wear) are updated by hand or reinstalled.
+
 const (
 	// HealthWait is how long a newly installed version has, from its first
 	// start, to report a hub connection before it is rolled back.
