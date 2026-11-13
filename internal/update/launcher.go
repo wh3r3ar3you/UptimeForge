@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -39,11 +40,9 @@ func Choose(stateDir, builtin, builtinVersion string) (path, version string) {
 		if v == "" || bad[v] || Compare(v, builtinVersion) <= 0 {
 			continue
 		}
-		p := binPath(stateDir, v)
-		if st, err := os.Stat(p); err != nil || !st.Mode().IsRegular() {
-			continue
+		if p := binPath(stateDir, v); isFile(p) {
+			return p, v
 		}
-		return p, v
 	}
 	return builtin, builtinVersion
 }
@@ -73,8 +72,12 @@ type launcher struct {
 	log                               *slog.Logger
 }
 
-// errUnhealthy ends a child that did not connect in time.
-var errUnhealthy = errors.New("no hub connection within the health window")
+var (
+	// errUnhealthy ends a child that did not connect in time.
+	errUnhealthy = errors.New("no hub connection within the health window")
+	// errStart wraps a child that could not be started at all.
+	errStart = errors.New("cannot start")
+)
 
 func (l *launcher) run(ctx context.Context) error {
 	if l.builtin == "" {
@@ -103,14 +106,22 @@ func (l *launcher) run(ctx context.Context) error {
 		switch {
 		case ctx.Err() != nil:
 			return nil
-		case errors.Is(err, errUnhealthy):
+		case path != l.builtin && (errors.Is(err, errUnhealthy) || errors.Is(err, errStart)):
+			if errors.Is(err, errStart) {
+				l.log.Error("installed agent cannot be started", "version", v, "err", err)
+			}
 			l.rollBack(v, firstStart)
 			backoff = l.minBackoff
 			continue
 		case code == ExitRestart:
-			l.log.Info("agent restarts into a new choice", "version", v)
-			backoff = l.minBackoff
-			continue
+			// Only a new choice deserves an immediate start: the same one
+			// again would spin (an update this launcher does not select).
+			if p, nv := Choose(l.stateDir, l.builtin, l.builtinVersion); p != path || nv != v {
+				l.log.Info("agent restarts into a new choice", "from", v, "to", nv)
+				backoff = l.minBackoff
+				continue
+			}
+			l.log.Warn("update installed but not selected", "version", v)
 		}
 		if time.Since(started) >= l.stable {
 			backoff = l.minBackoff
@@ -150,10 +161,13 @@ func (l *launcher) rollBack(v string, firstStart map[string]time.Time) {
 // marker (errUnhealthy). In the last two cases the child is stopped first.
 func (l *launcher) runChild(ctx context.Context, path, v string, deadline time.Time) (int, error) {
 	cmd := exec.Command(path, l.args...)
-	cmd.Env = append(os.Environ(), "UF_LAUNCHER=1")
+	// The child refuses updates this launcher would not select (see
+	// agent.Config.LauncherBuiltin).
+	cmd.Env = append(os.Environ(), "UF_LAUNCHER=1", "UF_LAUNCHER_BUILTIN="+l.builtinVersion)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	cmd.SysProcAttr = childAttr()
 	if err := cmd.Start(); err != nil {
-		return -1, err
+		return -1, fmt.Errorf("%w: %w", errStart, err)
 	}
 	l.log.Info("agent started", "version", v, "path", path, "pid", cmd.Process.Pid)
 	done := make(chan error, 1)

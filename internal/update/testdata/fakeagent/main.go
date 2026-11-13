@@ -1,12 +1,13 @@
 // Command fakeagent stands in for the agent in the launcher tests. Its
 // identity is the name of the directory it was copied into (a version under
-// bin/, or "builtin"); it logs "<identity> <UF_LAUNCHER>" to a file and then
-// behaves as the spec says for that identity.
+// bin/, or "builtin"); it logs "<identity> launcher=<UF_LAUNCHER>
+// builtin=<UF_LAUNCHER_BUILTIN>" to a file and then behaves as the spec says
+// for that identity.
 //
 //	fakeagent <log file> <state dir> <identity>=<mode>[,...]
 //
 // Modes: hang, connect (write connected-<identity>, then hang), exit1,
-// upgrade:<version> (make <version> current, then exit 75).
+// exit75, upgrade:<version> (make <version> current, then exit 75).
 package main
 
 import (
@@ -27,7 +28,7 @@ func main() {
 	if err != nil {
 		os.Exit(3)
 	}
-	f.WriteString(id + " " + os.Getenv("UF_LAUNCHER") + "\n")
+	f.WriteString(id + " launcher=" + os.Getenv("UF_LAUNCHER") + " builtin=" + os.Getenv("UF_LAUNCHER_BUILTIN") + "\n")
 	f.Close()
 
 	mode := "hang"
@@ -39,6 +40,8 @@ func main() {
 	switch {
 	case mode == "exit1":
 		os.Exit(1)
+	case mode == "exit75":
+		os.Exit(75)
 	case mode == "connect":
 		os.WriteFile(filepath.Join(stateDir, "connected-"+id), nil, 0o644)
 	case strings.HasPrefix(mode, "upgrade:"):

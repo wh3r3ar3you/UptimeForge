@@ -185,11 +185,17 @@ func Install(ctx context.Context, stateDir, version, goos, arch string, fetch fu
 		return fmt.Errorf("install %s: %w", version, err)
 	}
 
-	// The old current falls back to previous, unless it was rolled back:
-	// then the good previous stays the way back.
+	// A connected marker left from an earlier try of this version would let
+	// it skip the health watch: it goes before the version becomes current.
+	if err := os.Remove(filepath.Join(stateDir, ConnectedMarker(version))); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("install %s: stale connected marker: %w", version, err)
+	}
+
+	// The old current falls back to previous, unless it was rolled back or
+	// its binary is gone: then the old previous stays the way back.
 	oldCur, oldPrev := readVersion(stateDir, "current"), readVersion(stateDir, "previous")
 	prev := oldPrev
-	if oldCur != "" && !readBad(stateDir)[oldCur] {
+	if oldCur != "" && !readBad(stateDir)[oldCur] && isFile(binPath(stateDir, oldCur)) {
 		prev = oldCur
 	}
 	if prev == version {
@@ -207,11 +213,16 @@ func Install(ctx context.Context, stateDir, version, goos, arch string, fetch fu
 		return fmt.Errorf("install %s: %w", version, err)
 	}
 
-	// A re-install is a fresh try: no verdict and no connection carry over.
+	// A re-install is a fresh try: no verdict carries over (nor, above, a
+	// connection).
 	setBad(stateDir, version, false)
-	os.Remove(filepath.Join(stateDir, ConnectedMarker(version)))
 	prune(stateDir, version, prev)
 	return nil
+}
+
+func isFile(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.Mode().IsRegular()
 }
 
 // writeVersion writes a version file, or removes it for "".

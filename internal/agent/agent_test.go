@@ -318,6 +318,8 @@ type updateHub struct {
 	sysinfo chan struct{}
 	mu      sync.Mutex
 	fetched []string
+	// checkResults are the check IDs of results received.
+	checkResults []string
 }
 
 func newUpdateHub(t *testing.T, files map[string][]byte, version string) *updateHub {
@@ -363,6 +365,14 @@ func newUpdateHub(t *testing.T, files map[string][]byte, version string) *update
 				h.hello <- hello
 			case proto.TypeSysInfo:
 				h.sysinfo <- struct{}{}
+			case proto.TypeResults:
+				var rs proto.Results
+				json.Unmarshal(env.Data, &rs)
+				h.mu.Lock()
+				for _, r := range rs.Results {
+					h.checkResults = append(h.checkResults, r.CheckID)
+				}
+				h.mu.Unlock()
 			case proto.TypeUpdateResult:
 				var res proto.UpdateResult
 				json.Unmarshal(env.Data, &res)
@@ -400,9 +410,24 @@ func TestAgentHandlesUpdate(t *testing.T) {
 		dir := t.TempDir()
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		a := New(ctx, Config{HubURL: hub.srv.URL, Token: "t", MetricsInterval: -1, StateDir: dir, Launcher: true, UpdateKeys: keys}, slog.New(slog.DiscardHandler))
+		a := New(ctx, Config{HubURL: hub.srv.URL, Token: "t", MetricsInterval: -1, StateDir: dir, Launcher: true, LauncherBuiltin: "0.1.0", UpdateKeys: keys}, slog.New(slog.DiscardHandler))
+		// A result waiting for the next batch tick (not pushed at once) must
+		// still reach the hub before the restart closes the connection.
+		a.enqueue(checks.Result{CheckID: "pending", At: time.Now()})
+		<-a.notify
+		began := time.Now()
 		if err := a.Run(ctx); !errors.Is(err, ErrRestart) {
 			t.Fatalf("Run returned %v, want ErrRestart", err)
+		}
+		// Sent by the restart itself, not by waiting for the batch tick.
+		if took := time.Since(began); took >= batchEvery {
+			t.Fatalf("restart took %v", took)
+		}
+		hub.mu.Lock()
+		sent := strings.Join(hub.checkResults, ",")
+		hub.mu.Unlock()
+		if sent != "pending" {
+			t.Fatalf("results delivered before the restart: %q", sent)
 		}
 		if h := <-hub.hello; !h.Launcher {
 			t.Fatal("hello does not say the agent runs under the launcher")
@@ -427,19 +452,27 @@ func TestAgentHandlesUpdate(t *testing.T) {
 	})
 
 	for name, tc := range map[string]struct {
-		files    map[string][]byte
-		launcher bool
-		want     string
+		files      map[string][]byte
+		launcher   bool
+		builtin    string // the launcher's own version
+		want       string
+		noDownload bool
 	}{
-		"bad signature":    {signedRelease(stranger, bin), true, "signature"},
-		"files missing":    {map[string][]byte{}, true, "404"},
-		"without launcher": {signedRelease(priv, bin), false, "not running under the launcher"},
+		"bad signature":    {signedRelease(stranger, bin), true, "0.1.0", "signature", false},
+		"files missing":    {map[string][]byte{}, true, "0.1.0", "404", false},
+		"without launcher": {signedRelease(priv, bin), false, "", "not running under the launcher", true},
+		// The launcher would never select it: installing it means exit 75
+		// into the same binary, again and again.
+		"dev launcher":        {signedRelease(priv, bin), true, "dev", "development build cannot update", true},
+		"same as builtin":     {signedRelease(priv, bin), true, "0.9.0", "version not newer than the installed agent", true},
+		"older than builtin":  {signedRelease(priv, bin), true, "1.0.0", "version not newer than the installed agent", true},
+		"launcher of unknown": {signedRelease(priv, bin), true, "", "development build cannot update", true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			hub := newUpdateHub(t, tc.files, "0.9.0")
 			dir := t.TempDir()
 			ctx, cancel := context.WithCancel(context.Background())
-			a := New(ctx, Config{HubURL: hub.srv.URL, Token: "t", MetricsInterval: -1, StateDir: dir, Launcher: tc.launcher, UpdateKeys: keys}, slog.New(slog.DiscardHandler))
+			a := New(ctx, Config{HubURL: hub.srv.URL, Token: "t", MetricsInterval: -1, StateDir: dir, Launcher: tc.launcher, LauncherBuiltin: tc.builtin, UpdateKeys: keys}, slog.New(slog.DiscardHandler))
 			done := make(chan error, 1)
 			go func() { done <- a.Run(ctx) }()
 			select {
@@ -455,8 +488,8 @@ func TestAgentHandlesUpdate(t *testing.T) {
 			case <-time.After(10 * time.Second):
 				t.Fatal("no update result")
 			}
-			if !tc.launcher && len(hub.downloads()) != 0 {
-				t.Fatalf("downloaded without a launcher: %v", hub.downloads())
+			if tc.noDownload && len(hub.downloads()) != 0 {
+				t.Fatalf("downloaded an update it must refuse: %v", hub.downloads())
 			}
 			select {
 			case err := <-done:
@@ -476,7 +509,7 @@ func TestAgentHandlesUpdate(t *testing.T) {
 	t.Run("own version", func(t *testing.T) {
 		hub := newUpdateHub(t, signedRelease(priv, bin), version.Version)
 		ctx, cancel := context.WithCancel(context.Background())
-		a := New(ctx, Config{HubURL: hub.srv.URL, Token: "t", MetricsInterval: -1, StateDir: t.TempDir(), Launcher: true, UpdateKeys: keys}, slog.New(slog.DiscardHandler))
+		a := New(ctx, Config{HubURL: hub.srv.URL, Token: "t", MetricsInterval: -1, StateDir: t.TempDir(), Launcher: true, LauncherBuiltin: "0.1.0", UpdateKeys: keys}, slog.New(slog.DiscardHandler))
 		done := make(chan error, 1)
 		go func() { done <- a.Run(ctx) }()
 		<-hub.hello

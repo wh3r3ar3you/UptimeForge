@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -45,11 +46,8 @@ func main() {
 	hubURL, token, metrics, nics, src, insecure, join, stateDir, deny := f.hub, f.token, f.metrics, f.nics, f.src, f.insecure, f.join, f.stateDir, f.deny
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	if *hubURL == "" || (*token == "" && *join == "" && !hasSavedToken(*stateDir)) {
-		fmt.Fprintln(os.Stderr, "usage: uptimeforge-agent --hub https://hub.example.com --token TOKEN")
-		fmt.Fprintln(os.Stderr, "       uptimeforge-agent --hub https://hub.example.com --join INVITE-CODE [--state-dir DIR]")
-		fmt.Fprintln(os.Stderr, "       uptimeforge-agent check <vless://…|https://…|host:port> [--via socks5://…]")
-		fmt.Fprintln(os.Stderr, "       uptimeforge-agent launch [the flags above]   # runs the agent updatable by the hub")
+	if !f.complete() {
+		usage()
 		os.Exit(2)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -72,7 +70,7 @@ func main() {
 		*token = tok
 	}
 	cfg := agent.Config{HubURL: *hubURL, Token: *token, MetricsInterval: *metrics, SourceIP: *src, Insecure: *insecure,
-		StateDir: *stateDir, Launcher: os.Getenv("UF_LAUNCHER") == "1"}
+		StateDir: *stateDir, Launcher: os.Getenv("UF_LAUNCHER") == "1", LauncherBuiltin: os.Getenv("UF_LAUNCHER_BUILTIN")}
 	if *metrics == 0 {
 		cfg.MetricsInterval = -1
 	}
@@ -115,18 +113,47 @@ func agentFlags(fs *flag.FlagSet) flags {
 	}
 }
 
+// complete says whether the agent has what it needs to start: a hub, and a
+// token, an invite code or a token saved by an earlier join.
+func (f flags) complete() bool {
+	return *f.hub != "" && (*f.token != "" || *f.join != "" || hasSavedToken(*f.stateDir))
+}
+
+func usage() {
+	fmt.Fprintln(os.Stderr, "usage: uptimeforge-agent --hub https://hub.example.com --token TOKEN")
+	fmt.Fprintln(os.Stderr, "       uptimeforge-agent --hub https://hub.example.com --join INVITE-CODE [--state-dir DIR]")
+	fmt.Fprintln(os.Stderr, "       uptimeforge-agent check <vless://…|https://…|host:port> [--via socks5://…]")
+	fmt.Fprintln(os.Stderr, "       uptimeforge-agent launch [the flags above]   # runs the agent updatable by the hub")
+}
+
+// parseLaunch checks the agent flags given to launch as the agent would and
+// returns the state dir they name. What the agent would refuse on every
+// start is refused here at once rather than in a child restart loop.
+func parseLaunch(args []string) (stateDir string, err error) {
+	fs := flag.NewFlagSet("launch", flag.ContinueOnError)
+	fs.SetOutput(io.Discard) // launch prints the error and the usage
+	f := agentFlags(fs)
+	if err := fs.Parse(args); err != nil {
+		return "", err
+	}
+	if !f.complete() {
+		return "", errors.New("--hub and one of --token, --join or a saved token are required")
+	}
+	return *f.stateDir, nil
+}
+
 // launch runs the agent as a child that can be updated and rolled back:
 //
 //	uptimeforge-agent launch [agent flags...]
 //
 // The child gets the same flags; the state dir is read from them as the
-// agent reads it. Flags the agent would refuse are refused here at once
-// rather than in a restart loop.
+// agent reads it.
 func launch(args []string) int {
-	fs := flag.NewFlagSet("launch", flag.ContinueOnError)
-	f := agentFlags(fs)
-	if err := fs.Parse(args); err != nil {
-		return 2 // the flag package printed why
+	stateDir, err := parseLaunch(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		usage()
+		return 2
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	slog.SetDefault(log)
@@ -137,8 +164,8 @@ func launch(args []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	log.Info("UptimeForge agent launcher", "version", version.Version, "state_dir", *f.stateDir)
-	if err := update.Launch(ctx, *f.stateDir, self, args); err != nil {
+	log.Info("UptimeForge agent launcher", "version", version.Version, "state_dir", stateDir)
+	if err := update.Launch(ctx, stateDir, self, args); err != nil {
 		log.Error("launcher stopped", "err", err)
 		return 1
 	}

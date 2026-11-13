@@ -66,6 +66,11 @@ type Config struct {
 	// (UF_LAUNCHER=1): only then does it install updates the hub pushes and
 	// mark its version connected.
 	Launcher bool
+	// LauncherBuiltin is the launcher's own version (UF_LAUNCHER_BUILTIN).
+	// The launcher selects only installed releases newer than it, so the
+	// agent refuses any other update: installing it would restart into the
+	// same binary over and over.
+	LauncherBuiltin string
 	// UpdateKeys verify updates; nil means update.ReleaseKeys. A test hook.
 	UpdateKeys []ed25519.PublicKey
 }
@@ -337,17 +342,27 @@ func (a *Agent) session(ctx context.Context) error {
 	}
 	a.log.Info("connected to hub", "url", WSURL(a.cfg.HubURL))
 
-	errc := make(chan error, 2)
-	go func() { errc <- a.readLoop(ctx, conn, client) }()
-	go func() { errc <- a.writeLoop(ctx, conn) }()
+	rerr, werr := make(chan error, 1), make(chan error, 1)
+	go func() { rerr <- a.readLoop(ctx, conn, client) }()
+	go func() { werr <- a.writeLoop(ctx, conn) }()
 	select {
-	case err = <-errc:
+	case err = <-rerr:
+	case err = <-werr:
 	case <-a.restart:
+		// writeLoop sends what is pending, then returns; a write stuck
+		// behind a slow link does not hold the restart up for long.
+		select {
+		case <-werr:
+		case <-time.After(restartFlush + time.Second):
+		}
 		err = ErrRestart
 	}
 	conn.Close(websocket.StatusNormalClosure, "")
 	return err
 }
+
+// restartFlush bounds the last flush before an update restart.
+const restartFlush = 2 * time.Second
 
 // sendSysInfo describes the host to the hub. It waits for the first
 // assignment of a session, which may say the hub does not want host data.
@@ -435,8 +450,15 @@ func (a *Agent) startUpdate(ctx context.Context, v string, client *http.Client) 
 	if v == version.Version {
 		return
 	}
-	if !a.cfg.Launcher {
+	switch {
+	case !a.cfg.Launcher:
 		a.updateFailed(ctx, v, errors.New("not running under the launcher"))
+		return
+	case !update.IsRelease(a.cfg.LauncherBuiltin):
+		a.updateFailed(ctx, v, errors.New("development build cannot update"))
+		return
+	case update.Compare(v, a.cfg.LauncherBuiltin) <= 0:
+		a.updateFailed(ctx, v, fmt.Errorf("version not newer than the installed agent %s", a.cfg.LauncherBuiltin))
 		return
 	}
 	if !a.updating.CompareAndSwap(false, true) {
@@ -564,6 +586,14 @@ func (a *Agent) writeLoop(ctx context.Context, conn *websocket.Conn) error {
 			continue
 		case <-flush.C:
 		case <-a.notify:
+		case <-a.restart:
+			// Results waiting for the next tick go out before the restart
+			// closes the connection; what does not make it stays lost
+			// with the process, as it would on any stop.
+			fctx, cancel := context.WithTimeout(ctx, restartFlush)
+			defer cancel()
+			a.flush(func(msg []byte) error { return conn.Write(fctx, websocket.MessageText, msg) })
+			return ErrRestart
 		}
 		if err := a.flush(func(msg []byte) error {
 			wctx, cancel := context.WithTimeout(ctx, 15*time.Second)

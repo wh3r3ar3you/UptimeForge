@@ -160,24 +160,50 @@ func (f *fixture) start() {
 	})
 }
 
+// started lists the children started so far, failing the test if one ran
+// without UF_LAUNCHER=1 or without the builtin version in its environment.
+func (f *fixture) started() []string {
+	f.t.Helper()
+	b, _ := os.ReadFile(f.log)
+	var ids []string
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if line == "" {
+			continue
+		}
+		fs := strings.Fields(line)
+		if len(fs) != 3 || fs[1] != "launcher=1" || fs[2] != "builtin="+f.l.builtinVersion {
+			f.t.Fatalf("a child ran without UF_LAUNCHER=1 or UF_LAUNCHER_BUILTIN: %q", line)
+		}
+		ids = append(ids, fs[0])
+	}
+	return ids
+}
+
 // starts waits until the children started match want, in order.
 func (f *fixture) starts(want ...string) {
 	f.t.Helper()
 	var got []string
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		b, _ := os.ReadFile(f.log)
-		got = strings.Fields(strings.ReplaceAll(string(b), " 1\n", "\n"))
-		if strings.Contains(string(b), "  ") || strings.Contains(string(b), " \n") {
-			f.t.Fatalf("a child ran without UF_LAUNCHER=1: %q", b)
-		}
-		if len(got) >= len(want) {
+		if got = f.started(); len(got) >= len(want) {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		f.t.Fatalf("children started: %v, want %v", got, want)
+	}
+}
+
+// waitBad waits until v is in bad.
+func (f *fixture) waitBad(v string) {
+	f.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !readBad(f.state)[v] && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !readBad(f.state)[v] {
+		f.t.Fatalf("%s never marked bad", v)
 	}
 }
 
@@ -191,24 +217,34 @@ func TestLaunchRollsBack(t *testing.T) {
 			writeState(t, f.state, "previous", "0.2.1")
 			began := time.Now()
 			f.start()
-			deadline := time.Now().Add(5 * time.Second)
-			for !readBad(f.state)["0.3.0"] && time.Now().Before(deadline) {
-				time.Sleep(10 * time.Millisecond)
-			}
-			if !readBad(f.state)["0.3.0"] {
-				t.Fatal("0.3.0 never marked bad")
-			}
+			f.waitBad("0.3.0")
 			if took := time.Since(began); took < 200*time.Millisecond {
 				t.Fatalf("marked bad after %v, before healthWait", took)
 			}
 			time.Sleep(300 * time.Millisecond) // 0.2.1 is up: no more starts
-			b, _ := os.ReadFile(f.log)
-			lines := strings.Fields(strings.ReplaceAll(string(b), " 1\n", "\n"))
-			if lines[0] != "0.3.0" || lines[len(lines)-1] != "0.2.1" || strings.Count(string(b), "0.2.1") != 1 {
-				t.Fatalf("children started: %v", lines)
+			ids := f.started()
+			if ids[0] != "0.3.0" || ids[len(ids)-1] != "0.2.1" || strings.Count(strings.Join(ids, " "), "0.2.1") != 1 {
+				t.Fatalf("children started: %v", ids)
 			}
 		})
 	}
+}
+
+// An installed version that cannot even be started (not an executable for
+// this host, say) is rolled back at once, without waiting out healthWait.
+func TestLaunchRollsBackUnstartable(t *testing.T) {
+	f := newFixture(t, "0.2.1=connect", "0.2.1")
+	f.l.healthWait = time.Hour
+	broken := binPath(f.state, "0.3.0")
+	os.MkdirAll(filepath.Dir(broken), 0o755)
+	if err := os.WriteFile(broken, []byte("not a program"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeState(t, f.state, "current", "0.3.0")
+	writeState(t, f.state, "previous", "0.2.1")
+	f.start()
+	f.waitBad("0.3.0")
+	f.starts("0.2.1")
 }
 
 // A version that connected keeps running past healthWait.
@@ -235,18 +271,34 @@ func TestLaunchRestartsOn75(t *testing.T) {
 	f.starts("0.3.0", "0.4.0")
 }
 
+// Exit 75 that leaves the choice as it was (the update is not selectable)
+// is no reason to spin: it takes the crash backoff.
+func TestLaunch75WithoutNewChoiceBacksOff(t *testing.T) {
+	f := newFixture(t, "builtin=exit75")
+	f.l.minBackoff, f.l.maxBackoff = time.Hour, time.Hour
+	f.start()
+	f.starts("builtin")
+	time.Sleep(400 * time.Millisecond)
+	f.starts("builtin")
+}
+
 // Any other exit restarts the same choice after a backoff.
 func TestLaunchRestartsOnCrash(t *testing.T) {
 	f := newFixture(t, "builtin=exit1")
 	f.start()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		b, _ := os.ReadFile(f.log)
-		if n := strings.Count(string(b), "builtin 1\n"); n >= 3 && n == strings.Count(string(b), "\n") {
-			return
+		if len(f.started()) >= 3 {
+			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	b, _ := os.ReadFile(f.log)
-	t.Fatalf("children started: %q", b)
+	for _, id := range f.started() {
+		if id != "builtin" {
+			t.Fatalf("children started: %v", f.started())
+		}
+	}
+	if n := len(f.started()); n < 3 {
+		t.Fatalf("%d restarts", n)
+	}
 }

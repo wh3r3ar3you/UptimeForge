@@ -206,3 +206,43 @@ func TestInstallClearsBadAndKeepsGoodPrevious(t *testing.T) {
 		t.Fatal("re-install did not become current")
 	}
 }
+
+// previous is the way back, so it only ever names an installed binary.
+func TestInstallPromotesOnlyInstalledCurrent(t *testing.T) {
+	pub, priv := newKey(t)
+	keys := []ed25519.PublicKey{pub}
+	goos, arch := runtime.GOOS, ReleaseArch()
+	dir := t.TempDir()
+	ctx := context.Background()
+	for _, v := range []string{"0.3.0", "0.4.0"} {
+		if err := Install(ctx, dir, v, goos, arch, newRelease(t, priv, goos, arch, []byte(v)).fetch, keys); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.RemoveAll(filepath.Join(dir, "bin", "0.4.0")) // current lost its binary
+	if err := Install(ctx, dir, "0.5.0", goos, arch, newRelease(t, priv, goos, arch, []byte("0.5.0")).fetch, keys); err != nil {
+		t.Fatal(err)
+	}
+	if readState(t, dir, "current") != "0.5.0" || readState(t, dir, "previous") != "0.3.0" {
+		t.Fatalf("current %q previous %q, want 0.5.0 and 0.3.0", readState(t, dir, "current"), readState(t, dir, "previous"))
+	}
+}
+
+// A stale connected marker that cannot be removed would let the new binary
+// skip its health watch: the install fails before it becomes current.
+func TestInstallFailsOnStaleMarker(t *testing.T) {
+	pub, priv := newKey(t)
+	goos, arch := runtime.GOOS, ReleaseArch()
+	dir := t.TempDir()
+	marker := filepath.Join(dir, ConnectedMarker("0.3.0"))
+	if err := os.MkdirAll(filepath.Join(marker, "stuck"), 0o755); err != nil { // a non-empty directory: Remove fails
+		t.Fatal(err)
+	}
+	err := Install(context.Background(), dir, "0.3.0", goos, arch, newRelease(t, priv, goos, arch, []byte("0.3.0")).fetch, []ed25519.PublicKey{pub})
+	if err == nil {
+		t.Fatal("installed with a stale marker in place")
+	}
+	if readState(t, dir, "current") != "" {
+		t.Fatal("current written")
+	}
+}
