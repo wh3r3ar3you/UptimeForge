@@ -52,8 +52,8 @@ cp -r "$rel" "$tmp/rel5"; echo tampered >>"$tmp/rel5/uptimeforge-agent_linux_amd
 expect_fail "forged checksums.txt" "signature check failed" sh "$root/deploy/fetch-agents.sh" "file://$urlroot/rel5" "$tmp/out5"
 
 # 6. Signed by another key.
-"$tmp/sign" keygen >"$tmp/priv2" 2>/dev/null
-cp -r "$rel" "$tmp/rel6"; UF_RELEASE_KEY=$(cat "$tmp/priv2") "$tmp/sign" "$tmp/rel6/checksums.txt"
+"$tmp/sign" keygen >"$tmp/priv2" 2>"$tmp/pub2"
+cp -r "$rel" "$tmp/rel6"; UF_RELEASE_PUBKEYS=$(cat "$tmp/pub2") UF_RELEASE_KEY=$(cat "$tmp/priv2") "$tmp/sign" "$tmp/rel6/checksums.txt"
 expect_fail "foreign signature" "signature check failed" sh "$root/deploy/fetch-agents.sh" "file://$urlroot/rel6" "$tmp/out6"
 
 # 7. A binary absent from checksums.txt.

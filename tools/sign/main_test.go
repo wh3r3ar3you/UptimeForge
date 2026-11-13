@@ -47,7 +47,7 @@ func TestSignThenVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errOut bytes.Buffer
-	if err := run([]string{file}, mapEnv(map[string]string{"UF_RELEASE_KEY": priv}), &out, &errOut); err != nil {
+	if err := run([]string{file}, mapEnv(map[string]string{"UF_RELEASE_KEY": priv, "UF_RELEASE_PUBKEYS": pub}), &out, &errOut); err != nil {
 		t.Fatal(err)
 	}
 	sig, err := os.ReadFile(file + ".sig")
@@ -126,7 +126,7 @@ func TestVerifyDefaultsToReleaseKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errOut bytes.Buffer
-	if err := run([]string{file}, mapEnv(map[string]string{"UF_RELEASE_KEY": priv}), &out, &errOut); err != nil {
+	if err := run([]string{file}, mapEnv(map[string]string{"UF_RELEASE_KEY": priv, "UF_RELEASE_PUBKEYS": pub}), &out, &errOut); err != nil {
 		t.Fatal(err)
 	}
 	// Signed by a throwaway key: the built-in release key must reject it.
@@ -144,5 +144,45 @@ func TestVerifyDefaultsToReleaseKeys(t *testing.T) {
 	defer func() { update.ReleaseKeys = saved }()
 	if err := run([]string{"verify", file}, mapEnv(nil), &out, &errOut); err != nil {
 		t.Fatalf("verify did not fall back to update.ReleaseKeys: %v", err)
+	}
+}
+
+// A key agents do not trust would make a release no agent can install:
+// sign refuses it before writing anything. The keys are update.ReleaseKeys,
+// or UF_RELEASE_PUBKEYS for a test release.
+func TestSignRefusesUntrustedKey(t *testing.T) {
+	priv, pub := newPair(t)
+	_, other := newPair(t)
+	file := filepath.Join(t.TempDir(), "checksums.txt")
+	if err := os.WriteFile(file, []byte("abc  x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, env := range map[string]map[string]string{
+		"not a release key":         {"UF_RELEASE_KEY": priv},
+		"not in UF_RELEASE_PUBKEYS": {"UF_RELEASE_KEY": priv, "UF_RELEASE_PUBKEYS": other},
+	} {
+		var out, errOut bytes.Buffer
+		err := run([]string{file}, mapEnv(env), &out, &errOut)
+		if err == nil || !strings.Contains(err.Error(), "not a key agents trust") {
+			t.Errorf("%s: %v", name, err)
+		}
+		if err != nil && strings.Contains(err.Error(), priv) {
+			t.Errorf("%s: the error shows the key", name)
+		}
+		if _, statErr := os.Stat(file + ".sig"); statErr == nil {
+			t.Fatalf("%s: wrote a .sig", name)
+		}
+	}
+	// The same key once agents trust it.
+	keys, err := update.ParsePublicKeys(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := update.ReleaseKeys
+	update.ReleaseKeys = append([]ed25519.PublicKey{}, append(saved, keys...)...)
+	defer func() { update.ReleaseKeys = saved }()
+	var out, errOut bytes.Buffer
+	if err := run([]string{file}, mapEnv(map[string]string{"UF_RELEASE_KEY": priv}), &out, &errOut); err != nil {
+		t.Fatalf("a release key: %v", err)
 	}
 }

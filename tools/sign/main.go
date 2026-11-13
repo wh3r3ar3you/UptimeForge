@@ -5,6 +5,11 @@
 //	go run ./tools/sign keygen 2>pub.txt >priv.txt   # private base64 -> stdout, public -> stderr
 //	UF_RELEASE_KEY=<private base64> go run ./tools/sign dist/checksums.txt   # writes dist/checksums.txt.sig
 //	UF_RELEASE_PUBKEYS=<public base64>[,...] go run ./tools/sign verify dist/checksums.txt   # keys default to the built-in update.ReleaseKeys
+//
+// sign refuses a key whose public half agents do not trust (not in
+// update.ReleaseKeys) before writing the .sig: no agent could install such a
+// release. A test release signed with a throwaway key names that key in
+// UF_RELEASE_PUBKEYS.
 package main
 
 import (
@@ -16,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/wh3r3ar3you/uptimeforge/internal/update"
@@ -37,7 +43,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) er
 	case len(args) == 2 && args[0] == "verify":
 		return verify(args[1], getenv("UF_RELEASE_PUBKEYS"), stdout)
 	case len(args) == 1 && args[0] != "verify":
-		return sign(args[0], getenv("UF_RELEASE_KEY"))
+		return sign(args[0], getenv("UF_RELEASE_KEY"), getenv("UF_RELEASE_PUBKEYS"))
 	}
 	return errors.New(usage)
 }
@@ -56,10 +62,20 @@ func keygen(stdout, stderr io.Writer) error {
 	return err
 }
 
-func sign(file, key string) error {
+func sign(file, key, pubkeys string) error {
 	priv, err := parsePrivateKey(key)
 	if err != nil {
 		return err
+	}
+	keys, err := trustedKeys(pubkeys)
+	if err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(keys, func(k ed25519.PublicKey) bool { return k.Equal(priv.Public()) }) {
+		if strings.TrimSpace(pubkeys) != "" {
+			return errors.New("UF_RELEASE_KEY is not a key agents trust: its public half is not in UF_RELEASE_PUBKEYS")
+		}
+		return errors.New("UF_RELEASE_KEY is not a key agents trust: its public half is not in update.ReleaseKeys (internal/update/keys.go)")
 	}
 	data, err := os.ReadFile(file)
 	if err != nil {
@@ -86,13 +102,23 @@ func parsePrivateKey(s string) (ed25519.PrivateKey, error) {
 	return priv, nil
 }
 
+// trustedKeys are the keys a release is checked against: UF_RELEASE_PUBKEYS
+// when set, else the ones built into the agent.
+func trustedKeys(pubkeys string) ([]ed25519.PublicKey, error) {
+	if strings.TrimSpace(pubkeys) == "" {
+		return update.ReleaseKeys, nil
+	}
+	keys, err := update.ParsePublicKeys(pubkeys)
+	if err != nil {
+		return nil, fmt.Errorf("UF_RELEASE_PUBKEYS: %w", err)
+	}
+	return keys, nil
+}
+
 func verify(file, pubkeys string, stdout io.Writer) error {
-	keys := update.ReleaseKeys
-	if strings.TrimSpace(pubkeys) != "" {
-		var err error
-		if keys, err = update.ParsePublicKeys(pubkeys); err != nil {
-			return fmt.Errorf("UF_RELEASE_PUBKEYS: %w", err)
-		}
+	keys, err := trustedKeys(pubkeys)
+	if err != nil {
+		return err
 	}
 	data, err := os.ReadFile(file)
 	if err != nil {
