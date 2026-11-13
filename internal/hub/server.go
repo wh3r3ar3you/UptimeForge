@@ -231,6 +231,9 @@ func (h *Hub) attach(p *probe, ac *agentConn, hello proto.Hello, tokenHash strin
 	p.lastAssign = nil
 	h.transition("probe:"+p.cfg.ID, model.KindOK, "", nil, meta{}, now)
 	h.pushAssignments()
+	if len(p.watchers) > 0 {
+		h.renewLive(p) // someone is already watching: no need to wait for the next renewal
+	}
 	return true
 }
 

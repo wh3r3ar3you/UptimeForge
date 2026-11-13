@@ -120,7 +120,9 @@ func (h *Hub) byID(id string) *model.Incident {
 	return nil
 }
 
-// IngestMetrics stores the latest host snapshot of a probe.
+// IngestMetrics takes a host snapshot of a probe: it becomes the probe's
+// latest, goes to its live watchers, and, at the usual rate, to storage and
+// host alerts (see storePoint).
 func (h *Hub) IngestMetrics(probeID string, m proto.Metrics) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -128,11 +130,16 @@ func (h *Hub) IngestMetrics(probeID string, m proto.Metrics) {
 	if p == nil || p.cfg.Checker() {
 		return // a checker is someone else's machine: its host is none of our business
 	}
-	at, ok := measuredAt(time.Now(), m.Age)
+	at, ok := measuredAt(h.now(), m.Age)
 	if !ok || at.Before(p.metricsAt) {
 		return
 	}
 	p.metrics, p.metricsAt = &m, at
+	fanOut(p, m)
+	if !storePoint(p, at) {
+		return
+	}
+	p.storedAt = at
 	if h.rec != nil {
 		h.rec.System(probeID, m)
 	}

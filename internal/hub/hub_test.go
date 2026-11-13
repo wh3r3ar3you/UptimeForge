@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -3150,5 +3151,267 @@ func TestRunOnceEverywhereSkipsCheckers(t *testing.T) {
 	}
 	if got := h.RunOnce(done, plain, []string{"chk"}); len(got) != 1 || len(outs["chk"]) != 1 {
 		t.Fatalf("a checker picked by id: %+v, %d messages", got, len(outs["chk"]))
+	}
+}
+
+// liveRig is a hub with a fake agent connection on "srv" and a hand-driven
+// renewal ticker, so a test can play out 10 s renewals without waiting.
+type liveRig struct {
+	h     *Hub
+	conn  *agentConn
+	tick  chan time.Time
+	stops atomic.Int32
+	every atomic.Int64
+}
+
+func newLiveRig(t *testing.T) *liveRig {
+	t.Helper()
+	r := &liveRig{h: checkerHub(t, false), tick: make(chan time.Time),
+		conn: &agentConn{assign: make(chan []byte, 1), out: make(chan []byte, 16), cancel: func() {}}}
+	r.h.liveTicker = func(d time.Duration) (<-chan time.Time, func()) {
+		r.every.Store(int64(d))
+		return r.tick, func() { r.stops.Add(1) }
+	}
+	r.h.mu.Lock()
+	p := r.h.probes["srv"]
+	p.conn, p.online, p.since = r.conn, true, time.Now()
+	r.h.mu.Unlock()
+	return r
+}
+
+// live waits for a message to the agent and returns it as a live command.
+func (r *liveRig) live(t *testing.T) (proto.Live, bool) {
+	t.Helper()
+	select {
+	case msg := <-r.conn.out:
+		var env proto.Envelope
+		var l proto.Live
+		if json.Unmarshal(msg, &env) != nil || env.Type != proto.TypeLive || json.Unmarshal(env.Data, &l) != nil {
+			t.Fatalf("not a live command: %s", msg)
+		}
+		return l, true
+	case <-time.After(2 * time.Second):
+		return proto.Live{}, false
+	}
+}
+
+// quiet reports that nothing more was sent to the agent.
+func (r *liveRig) quiet() bool {
+	select {
+	case <-r.conn.out:
+		return false
+	case <-time.After(150 * time.Millisecond):
+		return true
+	}
+}
+
+// fire plays one renewal tick; false if no renewal loop took it.
+func (r *liveRig) fire(wait time.Duration) bool {
+	select {
+	case r.tick <- time.Now():
+		return true
+	case <-time.After(wait):
+		return false
+	}
+}
+
+// Review Focus 4: two windows on one server, one closes, the other keeps
+// its stream; both close and the agent is no longer asked for live points.
+func TestWatchRenewsLive(t *testing.T) {
+	r := newLiveRig(t)
+	want := proto.Live{IntervalMS: 1000, TTLMS: 15000}
+
+	c1, stop1, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l, ok := r.live(t); !ok || l != want {
+		t.Fatalf("first watcher: agent got %+v (sent %v), want %+v", l, ok, want)
+	}
+	if d := time.Duration(r.every.Load()); d != 10*time.Second {
+		t.Fatalf("renewal every %v, want 10s", d)
+	}
+	c2, stop2, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.fire(2 * time.Second) {
+		t.Fatal("no renewal loop")
+	}
+	if l, ok := r.live(t); !ok || l != want {
+		t.Fatalf("renewal after 10 s: agent got %+v (sent %v)", l, ok)
+	}
+
+	stop1()
+	stop1() // closing twice is harmless
+	if _, open := <-c1; open {
+		t.Fatal("the closed watcher's channel still delivers")
+	}
+	if !r.fire(2 * time.Second) {
+		t.Fatal("renewals stopped while a watcher remains")
+	}
+	if l, ok := r.live(t); !ok || l != want {
+		t.Fatalf("renewal with one watcher left: agent got %+v (sent %v)", l, ok)
+	}
+	r.h.IngestMetrics("srv", cpuAt(42))
+	select {
+	case m := <-c2:
+		if m.CPU != 42 {
+			t.Fatalf("the remaining watcher got %+v", m)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the remaining watcher got no point")
+	}
+
+	stop2()
+	if _, open := <-c2; open {
+		t.Fatal("the last watcher's channel still delivers")
+	}
+	r.fire(200 * time.Millisecond) // a tick already in flight must not renew either
+	if !r.quiet() {
+		t.Fatal("the agent is still asked for live points with nobody watching")
+	}
+	if !eventually(2*time.Second, func() bool { return r.stops.Load() == 1 }) {
+		t.Fatalf("renewal ticker stopped %d times, want 1", r.stops.Load())
+	}
+
+	// Watching again starts over at once.
+	_, stop3, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop3()
+	if l, ok := r.live(t); !ok || l != want {
+		t.Fatalf("watching again: agent got %+v (sent %v)", l, ok)
+	}
+}
+
+// A slow viewer loses points; it never holds up the agent's connection.
+func TestWatchSlowViewerDoesNotBlock(t *testing.T) {
+	r := newLiveRig(t)
+	_, stop, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	done := make(chan struct{})
+	go func() {
+		for i := range 500 {
+			r.h.IngestMetrics("srv", cpuAt(float64(i%100)))
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("IngestMetrics blocked on a viewer that reads nothing")
+	}
+}
+
+// An agent that connects while someone already watches is asked for live
+// points right away, not at the next renewal.
+func TestWatchAgentConnectsLater(t *testing.T) {
+	r := newLiveRig(t)
+	r.h.mu.Lock()
+	p := r.h.probes["srv"]
+	p.conn, p.online = nil, false
+	r.h.mu.Unlock()
+	_, stop, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	if !r.h.attach(p, r.conn, proto.Hello{Proto: proto.Version}, HashToken("token-srv-0123456789"), netip.Addr{}) {
+		t.Fatal("attach refused")
+	}
+	if _, ok := r.live(t); !ok {
+		t.Fatal("an agent connecting during a watch was not asked for live points")
+	}
+}
+
+func TestLiveMetricsStoredAtUsualRate(t *testing.T) {
+	r := newLiveRig(t)
+	rec := &sysRecorder{}
+	r.h.SetRecorder(rec)
+	var cmu sync.Mutex
+	clock := time.Now()
+	r.h.now = func() time.Time { cmu.Lock(); defer cmu.Unlock(); return clock }
+	advance := func(d time.Duration) { cmu.Lock(); clock = clock.Add(d); cmu.Unlock() }
+
+	c, stop, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.live(t)
+	for i := range 30 {
+		if i > 0 && i%10 == 0 { // the 10 s renewal
+			if !r.fire(2*time.Second) || func() bool { _, ok := r.live(t); return !ok }() {
+				t.Fatal("no renewal")
+			}
+		}
+		r.h.IngestMetrics("srv", cpuAt(float64(i)))
+		select {
+		case <-c:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("point %d not fanned out", i)
+		}
+		advance(time.Second)
+	}
+	n := rec.systems()
+	if n == 0 || n > 3 {
+		t.Fatalf("30 live points in 30 s stored %d times, want at most 3", n)
+	}
+	if st := r.h.Snapshot(); st.Probes[1].Metrics == nil || st.Probes[1].Metrics.CPU != 29 {
+		t.Fatalf("the snapshot must still show the newest point: %+v", st.Probes[1].Metrics)
+	}
+	stop()
+
+	// Once the live window is over, every point is stored again: the agent
+	// is back to its own interval, whatever that is.
+	advance(30 * time.Second)
+	r.h.IngestMetrics("srv", cpuAt(1))
+	advance(5 * time.Second)
+	r.h.IngestMetrics("srv", cpuAt(2))
+	if got := rec.systems(); got != n+2 {
+		t.Fatalf("after the live window %d of 2 points were stored", got-n)
+	}
+}
+
+func TestWatchRefusesCheckers(t *testing.T) {
+	cfg := &Config{DataDir: t.TempDir(), Baseline: []checks.Spec{},
+		Probes: []ProbeConfig{
+			{ID: "hub", Local: true},
+			{ID: "via", Via: "socks5://127.0.0.1:1080"},
+			{ID: "chk", Token: "token-chk-0123456789", Role: RoleChecker},
+		}}
+	h, err := New(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"chk", "via", "nope"} {
+		if c, stop, err := h.Watch(id); !errors.Is(err, ErrNoLive) || c != nil || stop != nil {
+			t.Fatalf("Watch(%q) = %v, %v; want ErrNoLive", id, c, err)
+		}
+	}
+
+	// The hub's own host needs no agent: watching it switches its collector
+	// to the live rate (a 15 s collector would send nothing in 5 s).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.Run(ctx)
+	c, stop, err := h.Watch("hub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	for i := range 2 {
+		select {
+		case m := <-c:
+			if m.MemTotal == 0 {
+				t.Fatalf("point %d is not the hub host's: %+v", i, m)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no live point %d from the hub's own host", i)
+		}
 	}
 }
