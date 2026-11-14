@@ -380,7 +380,7 @@ const agentAlertWindow = 10 * time.Minute
 func (h *Hub) agentDown(n NodeUsers, lostAt time.Time) bool {
 	now := time.Now()
 	for id, p := range h.probes {
-		if p.online || !IsNodeProbe(ProbeRef{Link: p.cfg.RemnawaveNode, ID: id, Name: p.cfg.Name, Host: p.hello.Hostname, Addr: p.addr}, n.Ref()) {
+		if p.online || !IsNodeProbe(ProbeRef{Link: p.cfg.RemnawaveNode, ID: id, Name: p.cfg.Name, Host: p.hello.Hostname, Addr: p.addr, Checker: p.cfg.Checker()}, n.Ref()) {
 			continue
 		}
 		key := "probe:" + id

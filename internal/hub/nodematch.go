@@ -23,6 +23,7 @@ type ProbeRef struct {
 	ID, Name string
 	Host     string     // the host name its agent reports
 	Addr     netip.Addr // where its agent connects from
+	Checker  bool       // a volunteer's checker agent: never a node
 }
 
 // Match kinds, strongest first: a server linked by hand matches only its
@@ -35,6 +36,9 @@ const (
 )
 
 func nodeMatch(p ProbeRef, n NodeRef) int {
+	if p.Checker {
+		return noMatch
+	}
 	if p.Link != "" {
 		if p.Link == n.ID {
 			return matchLink
@@ -62,7 +66,8 @@ func nodeMatch(p ProbeRef, n NodeRef) int {
 // (ignoring case and a "(…)" note), the node whose address is its agent's
 // host name, or the node whose address is the public address its agent
 // connects from. A private address (an agent behind the hub's own NAT, say)
-// says nothing.
+// says nothing, and a checker agent, a volunteer's machine whose name and
+// host name are not ours to trust, is never a node.
 func IsNodeProbe(p ProbeRef, n NodeRef) bool { return nodeMatch(p, n) != noMatch }
 
 // MatchNode is the panel node of a server, the strongest match first (see
@@ -99,5 +104,5 @@ func (p ProbeStatus) ProbeAddr() netip.Addr {
 
 // Ref is the server as it is matched to a panel node.
 func (p ProbeStatus) Ref() ProbeRef {
-	return ProbeRef{Link: p.RemnawaveNode, ID: p.ID, Name: p.Name, Host: p.Host, Addr: p.ProbeAddr()}
+	return ProbeRef{Link: p.RemnawaveNode, ID: p.ID, Name: p.Name, Host: p.Host, Addr: p.ProbeAddr(), Checker: p.Labels["role"] == RoleChecker}
 }

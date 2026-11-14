@@ -1773,6 +1773,10 @@ func TestIsNodeProbe(t *testing.T) {
 		{ProbeRef{ID: "s", Name: "s", Addr: addr("192.168.1.1")}, NodeRef{ID: "u3", Name: "n", Address: "192.168.1.1"}, false},
 		{ProbeRef{ID: "s", Name: "s", Addr: addr("100.64.1.1")}, NodeRef{ID: "u3", Name: "n", IPs: []string{"100.64.1.1"}}, false},
 		{ProbeRef{ID: "s", Name: "s", Addr: addr("203.0.113.8")}, uk, false},
+		// a checker agent is a volunteer's machine, never a node: its name and
+		// the host name it reports are not ours to trust
+		{ProbeRef{Checker: true, ID: "provider-uk", Name: "provider-uk"}, uk, false},
+		{ProbeRef{Checker: true, ID: "v", Name: "v", Host: "uk.example.com", Addr: addr("203.0.113.7")}, uk, false},
 	} {
 		if got := IsNodeProbe(c.p, c.n); got != c.want {
 			t.Errorf("IsNodeProbe(%+v, %+v) = %v", c.p, c.n, got)

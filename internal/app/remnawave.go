@@ -250,7 +250,7 @@ func (a *App) prune(ctx context.Context, nodes []remnawave.Node) {
 			paused = append(paused, c.ID)
 		}
 		for _, p := range a.Probes() {
-			if !p.Managed && p.ID != "hub" && hub.IsNodeProbe(hub.ProbeRef{Link: p.RemnawaveNode, ID: p.ID, Name: p.Name}, hub.NodeRef{ID: n.UUID, Name: n.Name}) {
+			if !p.Managed && p.ID != "hub" && hub.IsNodeProbe(hub.ProbeRef{Link: p.RemnawaveNode, ID: p.ID, Name: p.Name, Checker: p.Checker()}, hub.NodeRef{ID: n.UUID, Name: n.Name}) {
 				servers = append(servers, p.ID)
 			}
 		}
