@@ -475,6 +475,18 @@ body {
 
 /* The system cell: a big flag, the name, and where it is and what it runs */
 .uf-sys-flag { font-size: 24px; line-height: 1; flex: none; }
+/* The row state: a dot, or for a Remnawave node its users online in a capsule.
+   With the panel connected the slot is as wide as a capsule, so names line up. */
+.uf-sys-mark { flex: none; display: inline-flex; align-items: center; }
+.uf-sys-mark[data-rw] { min-width: 66px; }
+.uf-users-pill {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  min-width: 66px; height: 28px; padding: 0 9px; border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--c) 60%, transparent);
+  background: color-mix(in srgb, var(--c) 12%, transparent);
+  color: var(--c); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.uf-sys[data-density='compact'] .uf-users-pill { height: 24px; font-size: 13px; padding: 0 7px; }
 .uf-sys-name { font-size: 17px; font-weight: 700; line-height: 1.25; letter-spacing: -0.01em; }
 .uf-sys-sub { font-size: 12.5px; line-height: 1.3; margin-top: 2px; }
 .uf-sys[data-density='compact'] .uf-sys-flag { font-size: 20px; }

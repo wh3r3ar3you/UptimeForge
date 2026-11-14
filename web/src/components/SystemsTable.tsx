@@ -25,6 +25,7 @@ const L = {
   ru: {
     title: 'Все системы', sub: 'Нажмите на систему, чтобы открыть графики. Заголовки перетаскиваются, их края тянутся мышью.',
     filter: 'Фильтр…', view: 'Вид', add: 'Добавить сервер',
+    users_pill: 'Пользователей онлайн в Remnawave: {0}', users_pill_off: 'Нода отключена в Remnawave',
     density: 'Плотность', d_compact: 'Компактно', d_normal: 'Обычно', d_comfortable: 'Просторно',
     status: 'Статус', s_all: 'Все системы', s_online: 'В сети ({0})', s_offline: 'Не в сети ({0})', s_problems: 'С проблемами ({0})',
     sort: 'Сортировать по', columns: 'Видимые столбцы', reset: 'Сбросить вид',
@@ -45,6 +46,7 @@ const L = {
   en: {
     title: 'All systems', sub: 'Click a system for its charts. Drag a header to move it, its edge to resize.',
     filter: 'Filter…', view: 'View', add: 'Add server',
+    users_pill: 'Users online in Remnawave: {0}', users_pill_off: 'The node is down in Remnawave',
     density: 'Density', d_compact: 'Compact', d_normal: 'Normal', d_comfortable: 'Comfortable',
     status: 'Status', s_all: 'All systems', s_online: 'Online ({0})', s_offline: 'Offline ({0})', s_problems: 'With problems ({0})',
     sort: 'Sort by', columns: 'Visible columns', reset: 'Reset view',
@@ -235,6 +237,22 @@ function stateOf(p: ProbeRow, alerts: Incident[]): State {
 }
 
 const stateColor: Record<State, string> = { ok: status.ok, warn: status.partial, problem: status.down, offline: status.down, never: status.unknown };
+
+/** StateMark is the row's state: the users online of its Remnawave node in a
+ * capsule coloured by the state, as the panel shows it, or a dot for a server
+ * that is not a node. */
+function StateMark({ st, node, t }: { st: State; node?: RemnawaveNode; t: T }) {
+  if (!node) return <Dot color={stateColor[st]} pulse={st === 'ok'} size={11} />;
+  const off = !node.isConnected && !node.isDisabled;
+  const color = node.isDisabled ? status.unknown : off ? status.down : stateColor[st];
+  return (
+    <Tooltip label={off ? t('users_pill_off') : t('users_pill', num(node.usersOnline))}>
+      <span className="uf-users-pill" style={{ ['--c' as string]: color }}>
+        <IconUsers size={15} stroke={2} />{num(node.usersOnline)}
+      </span>
+    </Tooltip>
+  );
+}
 
 /** ViewMenu is Beszel's "View": density, status filter, sort and visible columns. */
 function ViewMenu({ prefs, setPrefs, counts, t, sort, setSort }: {
@@ -494,7 +512,9 @@ export function SystemsTable({ probes: all, hubURL, incidents }: { probes: Probe
     return [where, ...what].filter(Boolean).join(' · ');
   };
 
-  const total = width({ id: 'system', width: SYSTEM_WIDTH }) + visible.reduce((s, col) => s + width(col), 0) + 44;
+  // A Remnawave capsule in front of the name takes the room of a narrow column.
+  const sysW = SYSTEM_WIDTH + (rwq.data?.configured ? 56 : 0);
+  const total = width({ id: 'system', width: sysW }) + visible.reduce((s, col) => s + width(col), 0) + 44;
   // Untouched widths fit the screen, shared in proportion; dragged ones are kept as set.
   const custom = !!Object.keys(prefs.widths ?? {}).length || !!Object.keys(drag).length;
   const floor = 160 + visible.reduce((s, col) => s + col.min, 0) + 44;
@@ -524,13 +544,13 @@ export function SystemsTable({ probes: all, hubURL, incidents }: { probes: Probe
       <Box className="uf-scroll-x" px="md" pb="md">
         <table className="uf-sys" data-density={density} style={{ width: custom ? `max(100%, ${total}px)` : `max(100%, ${floor}px)`, ['--uf-row' as string]: `${ROW[density]}px` }}>
           <colgroup>
-            <col style={{ width: colW(width({ id: 'system', width: SYSTEM_WIDTH })) }} />
+            <col style={{ width: colW(width({ id: 'system', width: sysW })) }} />
             {visible.map((col) => <col key={col.id} style={{ width: colW(width(col)) }} />)}
             <col style={{ width: colW(44) }} />
           </colgroup>
           <thead>
             <tr>
-              <Th id="system" icon={IconServer2} w={width({ id: 'system', width: SYSTEM_WIDTH })} />
+              <Th id="system" icon={IconServer2} w={width({ id: 'system', width: sysW })} />
               {visible.map((col) => <Th key={col.id} id={col.id} icon={col.icon} w={width(col)} hint={col.hint} />)}
               <th />
             </tr>
@@ -546,7 +566,7 @@ export function SystemsTable({ probes: all, hubURL, incidents }: { probes: Probe
                 <tr key={p.id} data-state={st} {...clickableRow(() => nav(`/probes/${enc(p.id)}`))}>
                   <td>
                     <Group gap={12} wrap="nowrap" style={{ minWidth: 0 }}>
-                      <Dot color={stateColor[st]} pulse={st === 'ok'} size={11} />
+                      <span className="uf-sys-mark" data-rw={rwq.data?.configured || undefined}><StateMark st={st} node={rw(p)} t={t} /></span>
                       <span className="uf-sys-flag" aria-hidden>{flag(p.region) || '📍'}</span>
                       <Tooltip label={[p.host, p.mode === 'agent' ? '' : t(p.mode === 'via' ? 'via' : 'hub')].filter(Boolean).join(' · ') || p.id} openDelay={400}>
                         <Box style={{ minWidth: 0 }}>

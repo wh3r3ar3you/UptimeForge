@@ -158,7 +158,7 @@ func main() {
 		}
 	}()
 	time.Sleep(300 * time.Millisecond)
-	hosts := map[string]string{"de-hetzner": "hetzner-de", "fi-dc": "fi-dc-1", "vol-spb": "home-nas", "vol-kzn": "minipc"}
+	hosts := map[string]string{"de-hetzner": "de2.example.com", "fi-dc": "fi-dc-1", "vol-spb": "home-nas", "vol-kzn": "minipc"}
 	for _, id := range []string{"de-hetzner", "fi-dc", "vol-spb", "vol-kzn"} {
 		go agent.New(ctx, agent.Config{HubURL: hubURL, Token: tokens[id], MetricsInterval: 5 * time.Second, Hostname: hosts[id]}, log.With("agent", id)).Run(ctx)
 	}
