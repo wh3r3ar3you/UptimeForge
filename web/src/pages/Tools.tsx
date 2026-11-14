@@ -15,6 +15,7 @@ import { ProbePicker } from '../components/ProbePicker';
 import { classify, useReason, useWhy } from '../components/ProbeLines';
 import { KindIcon, kindColor, Legend, VerdictBadge } from '../components/Status';
 import { flag, ms } from '../format';
+import { urlCarriesSecret } from '../secrets';
 import { plural, useLang, useT } from '../i18n';
 import { status } from '../theme';
 
@@ -78,8 +79,9 @@ function verdictLines(outcomes: RunOutcome[], noNet: Set<string>) {
 
 /**
  * targetCarriesSecrets guesses, as SpecFor parses it, whether a pasted target
- * is a check with secrets: a share link (any scheme but http/https) or an
- * MTProxy link (tg://, t.me/proxy with its secret).
+ * is a check with secrets: a share link (any scheme but http/https), an
+ * MTProxy link (tg://, t.me/proxy with its secret), or an http(s) URL with a
+ * credential in it (the same rules as checks.URLCarriesSecret).
  */
 function targetCarriesSecrets(target: string) {
   const s = target.trim();
@@ -87,7 +89,7 @@ function targetCarriesSecrets(target: string) {
   if (!m) return false;
   const scheme = m[1].toLowerCase();
   if (scheme !== 'http' && scheme !== 'https') return true;
-  return /^https?:\/\/(www\.)?t(elegram)?\.me\/proxy\?/i.test(s);
+  return /^https?:\/\/(www\.)?t(elegram)?\.me\/proxy\?/i.test(s) || urlCarriesSecret(s);
 }
 
 function mbps(bps?: number) {

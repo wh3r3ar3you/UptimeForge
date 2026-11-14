@@ -23,16 +23,6 @@ const hidden = "••••••••"
 
 func isViewer(r *http.Request) bool { return userFrom(r.Context()).Role != store.RoleAdmin }
 
-// secretKey reports whether a query parameter or JSON key carries a credential.
-func secretKey(k string) bool {
-	k = strings.ToLower(k)
-	switch k {
-	case "id", "uuid", "auth", "psk", "key", "seed", "sid", "shortid", "shortids", "privatekey", "presharedkey":
-		return true
-	}
-	return strings.Contains(k, "pass") || strings.Contains(k, "secret") || strings.Contains(k, "token")
-}
-
 // redactLink hides the user part and secret parameters of a share or proxy
 // link: vless://uuid@host:443?…&sid=… becomes vless://••••••••@host:443?…&sid=••••••••.
 func redactLink(s string) string {
@@ -65,37 +55,18 @@ func redactLink(s string) string {
 	return out
 }
 
-// redactPath hides path segments that look like tokens: a subscription
-// page at /p_q7Xk2LmN9vRt4Z hands out a user's VPN configs to whoever has
-// it. A segment counts when it is 12+ characters of letters, digits, - or _
-// with both letters and digits; /api/v1/health or /telegram-widget stay.
+// redactPath hides path segments that look like tokens (checks.Tokenish):
+// a subscription page at /p_q7Xk2LmN9vRt4Z hands out a user's VPN configs
+// to whoever has it; /api/v1/health or /telegram-widget stay. What is hidden
+// here is what checks.URLCarriesSecret keeps off untrusted checkers.
 func redactPath(path string) string {
 	segs := strings.Split(path, "/")
 	for i, seg := range segs {
-		if tokenish(seg) {
+		if checks.Tokenish(seg) {
 			segs[i] = hidden
 		}
 	}
 	return strings.Join(segs, "/")
-}
-
-func tokenish(s string) bool {
-	if len(s) < 12 {
-		return false
-	}
-	letters, digits := false, false
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
-			letters = true
-		case r >= '0' && r <= '9':
-			digits = true
-		case r == '-', r == '_':
-		default:
-			return false
-		}
-	}
-	return letters && digits
 }
 
 // redactQuery hides values of secret keys, and values that look like tokens
@@ -103,7 +74,7 @@ func tokenish(s string) bool {
 func redactQuery(q string) string {
 	parts := strings.Split(q, "&")
 	for i, kv := range parts {
-		if k, v, ok := strings.Cut(kv, "="); ok && (secretKey(k) || tokenish(v)) {
+		if k, v, ok := strings.Cut(kv, "="); ok && (checks.SecretKey(k) || checks.Tokenish(v)) {
 			parts[i] = k + "=" + hidden
 		}
 	}
@@ -173,7 +144,7 @@ func redactTree(v any) any {
 	case map[string]any:
 		out := make(map[string]any, len(x))
 		for k, val := range x {
-			if secretKey(k) {
+			if checks.SecretKey(k) {
 				out[k] = hidden
 			} else {
 				out[k] = redactTree(val)

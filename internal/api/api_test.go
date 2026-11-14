@@ -27,6 +27,7 @@ import (
 
 	"github.com/wh3r3ar3you/uptimeforge/internal/agent"
 	"github.com/wh3r3ar3you/uptimeforge/internal/app"
+	"github.com/wh3r3ar3you/uptimeforge/internal/checks"
 	"github.com/wh3r3ar3you/uptimeforge/internal/geoip"
 	"github.com/wh3r3ar3you/uptimeforge/internal/hub"
 	"github.com/wh3r3ar3you/uptimeforge/internal/model"
@@ -467,6 +468,26 @@ func TestRedactLink(t *testing.T) {
 	}
 	if got := redactSubscription("https://sub.example.com:8443/api/sub/abc?fmt=v2"); got != "https://sub.example.com:8443/"+hidden {
 		t.Errorf("subscription: %q", got)
+	}
+}
+
+// What viewers see redacted in a URL is exactly what keeps a check off an
+// untrusted checker.
+func TestURLCarriesSecretMatchesRedaction(t *testing.T) {
+	for _, in := range []string{
+		"https://sub.example.com/p_q7Xk2LmN9vRt4Z",
+		"https://x.example.com/?token=abc",
+		"https://u:p@host/",
+		"https://example.com/health",
+		"https://api.example.com/health?token=t1&x=1",
+		"https://api.example.com/hook?room=Ab12Cd34Ef56Gh",
+		"https://app.example.com/api/v1/branding/telegram-widget",
+		"https://sub.example.com/sub/0f8e6c1d2b3a4f5e/vless",
+		"wss://ws.example.com/socket?v=2",
+	} {
+		if got, want := checks.URLCarriesSecret(in), redactLink(in) != in; got != want {
+			t.Errorf("URLCarriesSecret(%q) = %v, but redactLink changes it: %v", in, got, want)
+		}
 	}
 }
 

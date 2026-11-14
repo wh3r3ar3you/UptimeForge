@@ -3,6 +3,7 @@ import { IconLock } from '@tabler/icons-react';
 import { useMemo, type ReactNode } from 'react';
 import { isChecker, useProbes, type CatalogEntry, type CheckConfig, type ProbeRow } from '../api';
 import { flag } from '../format';
+import { urlCarriesSecret } from '../secrets';
 import { countWord, useLang, useT } from '../i18n';
 import { status } from '../theme';
 import { Dot } from './Status';
@@ -29,13 +30,16 @@ const L = {
 /**
  * carriesSecrets mirrors checks.CarriesSecrets: a check an untrusted checker
  * agent must not see. Xray always has a link, subscription or outbound;
- * MTProto with a link or secret; any catalog field marked secret with a value.
+ * MTProto with a link or secret; any catalog field marked secret with a value;
+ * an HTTP URL or a catalog URL field with a credential in it.
  */
 export function carriesSecrets(d: CheckConfig, catalog: CatalogEntry[]): boolean {
   if (d.type === 'xray') return true;
   if (d.type === 'mtproto' && (d.mtproto?.link || d.mtproto?.secret)) return true;
   const entries = catalog.filter((e) => e.type === d.type);
   const secret = new Set(entries.flatMap((e) => (e.fields ?? []).filter((f) => f.secret).map((f) => f.name)));
+  const urls = new Set(entries.flatMap((e) => (e.fields ?? []).filter((f) => f.url).map((f) => f.name)));
+  if (d.type === 'http' && urlCarriesSecret(d.http?.url ?? '')) return true;
   const filled = (v: unknown) => v != null && v !== '' && !(typeof v === 'object' && Object.keys(v as object).length === 0);
   const own = (d as unknown as Record<string, Record<string, unknown> | undefined>)[d.type];
   if (own && typeof own === 'object') {
@@ -43,6 +47,7 @@ export function carriesSecrets(d: CheckConfig, catalog: CatalogEntry[]): boolean
   }
   for (const [k, v] of Object.entries(d.params ?? {})) {
     if (v && (!entries.length || secret.has(k))) return true;
+    if (v && urls.has(k) && v.split(/\n/).some(urlCarriesSecret)) return true;
   }
   return false;
 }

@@ -21,8 +21,9 @@ type Field struct {
 	Advanced bool     `json:"advanced,omitempty"`
 	ShowIf   string   `json:"show_if,omitempty"` // "field=value"
 	// URL marks a field holding URLs, one per line: viewers see them with
-	// token-like path segments and secret query values masked.
-	URL bool `json:"-"`
+	// token-like path segments and secret query values masked, and a URL
+	// with a credential in it keeps the check off untrusted checkers.
+	URL bool `json:"url,omitempty"`
 }
 
 // TypeInfo describes a check type, or a preset of one. For http and dns the

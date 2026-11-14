@@ -88,6 +88,8 @@ export interface CheckConfig extends Spec {
 export interface CatalogField {
   name: string; kind: 'text' | 'password' | 'number' | 'bool' | 'select' | 'textarea'; required?: boolean; secret?: boolean;
   default?: string; options?: string[]; advanced?: boolean; show_if?: string;
+  /** Holds URLs, one per line: a credential in one makes the check carry secrets. */
+  url?: boolean;
 }
 export interface CatalogEntry {
   type: string; preset?: string; category: string; fields?: CatalogField[]; keyword?: boolean; hub_only?: boolean; needs?: string;

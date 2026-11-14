@@ -2726,6 +2726,26 @@ func TestUntrustedCheckerGetsNoSecrets(t *testing.T) {
 	}
 }
 
+// A subscription page or a ?token= URL is a credential too: an untrusted
+// checker picked by its operator must not get it, a trusted one may.
+func TestUntrustedCheckerGetsNoSecretURLs(t *testing.T) {
+	httpCheck := func(id, url string) CheckConfig {
+		return CheckConfig{Spec: checks.Spec{ID: id, Type: "http", HTTP: &checks.HTTPParams{URL: url, Method: "GET"}}, Probes: []string{"isp=mts"}}
+	}
+	sub := httpCheck("sub", "https://sub.example.com/p_q7Xk2LmN9vRt4Z")
+	tok := httpCheck("tok", "https://x.example.com/?token=abc")
+	login := httpCheck("login", "https://u:p@host/")
+	plain := httpCheck("plain", "https://example.com/health")
+	browser := CheckConfig{Spec: checks.Spec{ID: "browser", Type: "real-browser",
+		Params: map[string]string{"url": "https://sub.example.com/p_q7Xk2LmN9vRt4Z"}}, Probes: []string{"isp=mts"}}
+	if got, want := assignedIDs(checkerHub(t, false, sub, tok, login, plain, browser), "chk"), []string{"plain"}; !slices.Equal(got, want) {
+		t.Fatalf("untrusted checker got %v, want %v", got, want)
+	}
+	if got, want := assignedIDs(checkerHub(t, true, sub, tok, login, plain, browser), "chk"), []string{"sub", "tok", "login", "plain", "browser"}; !slices.Equal(got, want) {
+		t.Fatalf("trusted checker got %v, want %v", got, want)
+	}
+}
+
 func TestCheckerAssignHasNoMetrics(t *testing.T) {
 	h := checkerHub(t, false)
 	h.mu.Lock()
