@@ -11,13 +11,13 @@ import { Dot } from './Status';
 const L = {
   ru: {
     title: 'Внешний вид', themes: 'Тема', classic: 'Классика', warm: 'Тёплые', bright: 'Яркие', light: 'Светлые',
-    signal: 'Индикаторы', signal_hint: 'Цвет капсулы с юзерами, полосок ЦП, памяти и диска, load avg и точек состояния на странице систем.',
+    signal: 'Индикаторы', signal_hint: 'Цвет капсулы с юзерами, полосок ЦП, памяти и диска, load avg и точек состояния на странице систем, а также точек, полосок за 24 часа и аптайма на странице проверок.',
     font: 'Шрифт интерфейса', num: 'Шрифт цифр', same: 'Как интерфейс',
     sample: 'Нода в сети', hint: 'Тема и шрифты сохраняются в вашем профиле и одинаковы на всех устройствах.',
   },
   en: {
     title: 'Appearance', themes: 'Theme', classic: 'Classic', warm: 'Warm', bright: 'Bright', light: 'Light',
-    signal: 'Indicators', signal_hint: 'The colour of the users capsule, the CPU, memory and disk bars, load avg and the state dots on the systems page.',
+    signal: 'Indicators', signal_hint: 'The colour of the users capsule, the CPU, memory and disk bars, load avg and the state dots on the systems page, and of the dots, 24-hour bars and uptime on the checks page.',
     font: 'Interface font', num: 'Numbers font', same: 'Same as interface',
     sample: 'Node online', hint: 'The theme and fonts are saved to your profile and follow you to every device.',
   },

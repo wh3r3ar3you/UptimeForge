@@ -500,7 +500,8 @@ body {
 :root[data-uf-glow] .uf-sys .uf-bar-seg > span[data-on], .uf-sig-tile[data-glow] .uf-bar-seg > span[data-on] {
   box-shadow: 0 0 8px -1px color-mix(in srgb, var(--c) 75%, transparent);
 }
-:root[data-uf-glow] .uf-sys .uf-dot, .uf-sig-tile[data-glow] .uf-dot { box-shadow: 0 0 8px var(--uf-pulse); }
+:root[data-uf-glow] .uf-sys .uf-dot, :root[data-uf-glow] .uf-checks .uf-dot, .uf-sig-tile[data-glow] .uf-dot { box-shadow: 0 0 8px var(--uf-pulse); }
+:root[data-uf-glow] .uf-checks .uf-pulse-bar > span[data-on] { box-shadow: 0 0 6px -1px var(--c); }
 
 .uf-sig-sample { display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 10px; min-height: 52px; }
 .uf-sys-name { font-size: 17px; font-weight: 700; line-height: 1.25; letter-spacing: -0.01em; }

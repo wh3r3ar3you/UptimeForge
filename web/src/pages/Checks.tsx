@@ -19,7 +19,7 @@ import { ms } from '../format';
 import { useCommon, useLang, useT } from '../i18n';
 import { usePrefs } from '../prefs';
 import { reasonText } from '../reason';
-import { status } from '../theme';
+import { sig } from '../theme';
 
 const L = {
   ru: {
@@ -64,7 +64,7 @@ export function ProbeDots({ row, probes }: { row: CheckRow; probes: ProbeStatus[
     <Group gap={5} wrap="nowrap">
       {row.probes.map((c) => {
         const p = byId.get(c.probe);
-        const color = !c.status ? 'var(--uf-track)' : c.failing ? status.down : c.status === 'down' ? status.partial : status.ok;
+        const color = !c.status ? 'var(--uf-track)' : c.failing ? sig.down : c.status === 'down' ? sig.warn : sig.ok;
         const state = !c.status ? t('nodata') : c.failing ? t('failing') : c.status === 'down' ? t('down') : t('up');
         const extra = c.status === 'up' && c.latency != null ? ` · ${ms(c.latency)}` : c.reason ? ` · ${reasonText(c.reason, c.error, lang)}` : '';
         return <Dot key={c.probe} color={color} size={10} label={`${p?.name ?? c.probe}: ${state}${extra}`} />;
@@ -219,7 +219,7 @@ export default function Checks() {
           {add}
         </Empty>
       ) : (
-        <Stack gap="md">
+        <Stack gap="md" className="uf-checks">
           <Card padding="md">
             <Stack gap="sm">
               <Group gap="sm" wrap="wrap">

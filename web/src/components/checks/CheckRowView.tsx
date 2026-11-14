@@ -4,7 +4,7 @@ import { memo, type KeyboardEvent } from 'react';
 import type { Bar, CheckRow, ProbeStatus } from '../../api';
 import { ms, pct } from '../../format';
 import { useCommon } from '../../i18n';
-import { status } from '../../theme';
+import { sig, status } from '../../theme';
 import { Dot } from '../Status';
 import { isProblem } from './grouping';
 import { PulseBar } from './PulseBar';
@@ -20,9 +20,9 @@ export interface RowActions {
 
 export function verdictColor(r: CheckRow): string {
   if (r.paused) return status.paused;
-  if (r.verdict === 'down' || r.verdict === 'blocked') return status.down;
-  if (r.verdict === 'partial') return status.partial;
-  return r.verdict === 'ok' ? status.ok : status.unknown;
+  if (r.verdict === 'down' || r.verdict === 'blocked') return sig.down;
+  if (r.verdict === 'partial') return sig.warn;
+  return r.verdict === 'ok' ? sig.ok : status.unknown;
 }
 
 function probeSummary(r: CheckRow, probes: Map<string, ProbeStatus>): string {
@@ -84,7 +84,7 @@ export const CheckRowView = memo(function CheckRowView({
         <Text size="xs" c="dimmed" ff="monospace" truncate>{row.subscription ? count(row.children ?? 0, 'w_config') : row.target}</Text>
       </Box>
       <Box visibleFrom="md"><PulseBar bars={bars} from={from} step={step} t={t} onPick={(at) => actions.open(row, at)} /></Box>
-      <Text size="sm" fw={650} ta="right" className="uf-num" c={row.uptime_24h == null ? 'dimmed' : row.uptime_24h >= 0.999 ? status.ok : row.uptime_24h >= 0.99 ? status.partial : status.down}>
+      <Text size="sm" fw={650} ta="right" className="uf-num" c={row.uptime_24h == null ? 'dimmed' : row.uptime_24h >= 0.999 ? sig.ok : row.uptime_24h >= 0.99 ? sig.warn : sig.down}>
         {pct(row.uptime_24h)}
       </Text>
       <Text size="sm" ta="right" c="dimmed" className="uf-num" visibleFrom="sm">{ms(row.latency_24h)}</Text>

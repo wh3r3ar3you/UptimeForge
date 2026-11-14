@@ -63,3 +63,10 @@ export const status = {
   unknown: '#6b7685',
   paused: '#6b7685',
 } as const;
+
+/**
+ * sig are the live indicator colours: the user's signal palette (themes.ts
+ * SIGNALS), set on the page as variables. CSS only: not for charts, colour
+ * maths or SVG attributes.
+ */
+export const sig = { ok: 'var(--uf-ok)', warn: 'var(--uf-warn)', down: 'var(--uf-down)' } as const;
