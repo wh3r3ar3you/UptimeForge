@@ -22,7 +22,7 @@ const L = {
     conn: 'Соединения и процессы', tcp: 'TCP-сокеты', procs: 'процессы', blocked: 'ждут диск',
     new_agent: 'Нужен агент новее',
     live_wait: 'Ждём первую точку…', live_slow: 'Агент обновляется раз в 15 с — обновите агента для живого режима',
-    live_offline: 'Агент не на связи: живых точек нет', live_lost: 'Связь с хабом прервалась, переподключаемся…',
+    live_offline: 'Агент не на связи: живых точек нет', live_nometrics: 'Этот агент не отправляет метрики хоста', live_lost: 'Связь с хабом прервалась, переподключаемся…',
     live_failed: 'Живой поток недоступен: хаб отказал или проба больше не отдаёт метрики.', live_fallback: 'Показать последний час',
   },
   en: {
@@ -39,7 +39,7 @@ const L = {
     conn: 'Connections and processes', tcp: 'TCP sockets', procs: 'processes', blocked: 'waiting on disk',
     new_agent: 'Needs a newer agent',
     live_wait: 'Waiting for the first point…', live_slow: 'The agent updates every 15 s — update the agent for live mode',
-    live_offline: 'The agent is offline: no live points', live_lost: 'Lost the connection to the hub, reconnecting…',
+    live_offline: 'The agent is offline: no live points', live_nometrics: 'This agent sends no host metrics', live_lost: 'Lost the connection to the hub, reconnecting…',
     live_failed: 'The live stream is unavailable: the hub refused it or the probe no longer serves metrics.', live_fallback: 'Show the last hour',
   },
 };
@@ -64,7 +64,7 @@ function niceBytes(v: number) {
  * streams the last minute instead of reading storage; only servers (agents
  * and the hub itself) have it, never checkers or via probes.
  */
-export function HostCharts({ id, cores, online }: { id: string; cores?: number; online: boolean }) {
+export function HostCharts({ id, cores, online, sentMetrics }: { id: string; cores?: number; online: boolean; sentMetrics: boolean }) {
   const t = useT(L);
   const pal = usePalette();
   const w = useWindow('24h');
@@ -166,10 +166,12 @@ export function HostCharts({ id, cores, online }: { id: string; cores?: number; 
   const up100 = ({ max }: { max: number }) => Math.min(100, max <= 4 ? 5 : max <= 8 ? 10 : Math.ceil(max / 20) * 20);
 
   // What the live range says instead of, or above, the charts. An offline
-  // agent sends nothing either, so it must not be read as an old agent.
+  // agent sends nothing either, so it must not be read as an old agent; an
+  // agent that never sent metrics has them switched off, which is not old either.
   const liveNote = !live ? null
     : !online ? t('live_offline')
     : stream.state === 'lost' ? t('live_lost')
+    : !sentMetrics ? t('live_nometrics')
     : stream.slow ? t('live_slow')
     : !pts.length ? t('live_wait')
     : null;
