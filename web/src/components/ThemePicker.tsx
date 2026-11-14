@@ -1,19 +1,23 @@
 import { Box, Group, Modal, SimpleGrid, Stack, Text, UnstyledButton } from '@mantine/core';
-import { IconCheck } from '@tabler/icons-react';
+import { IconCheck, IconUsers } from '@tabler/icons-react';
 import { useEffect } from 'react';
 import { DEFAULT_NUM_FONT, DEFAULT_UI_FONT, loadAllFonts, NUM_FONTS, UI_FONTS, type UfFont } from '../fonts';
-import { useT } from '../i18n';
-import { usePrefs } from '../prefs';
-import { mix, THEMES, type UfTheme } from '../themes';
+import { useLang, useT } from '../i18n';
+import { usePrefs, type BarStyle } from '../prefs';
+import { findTheme, mix, signalColors, signalVars, SIGNALS, THEMES, type UfSignal, type UfTheme } from '../themes';
+import { Bar } from './SystemsTable';
+import { Dot } from './Status';
 
 const L = {
   ru: {
     title: 'Внешний вид', themes: 'Тема', classic: 'Классика', warm: 'Тёплые', bright: 'Яркие', light: 'Светлые',
+    signal: 'Индикаторы', signal_hint: 'Цвет капсулы с юзерами, полосок ЦП, памяти и диска, load avg и точек состояния на странице систем, а также точек, полосок за 24 часа и аптайма на странице проверок.',
     font: 'Шрифт интерфейса', num: 'Шрифт цифр', same: 'Как интерфейс',
     sample: 'Нода в сети', hint: 'Тема и шрифты сохраняются в вашем профиле и одинаковы на всех устройствах.',
   },
   en: {
     title: 'Appearance', themes: 'Theme', classic: 'Classic', warm: 'Warm', bright: 'Bright', light: 'Light',
+    signal: 'Indicators', signal_hint: 'The colour of the users capsule, the CPU, memory and disk bars, load avg and the state dots on the systems page, and of the dots, 24-hour bars and uptime on the checks page.',
     font: 'Interface font', num: 'Numbers font', same: 'Same as interface',
     sample: 'Node online', hint: 'The theme and fonts are saved to your profile and follow you to every device.',
   },
@@ -37,6 +41,27 @@ function Preview({ t }: { t: UfTheme }) {
   );
 }
 
+/** SignalTile shows a palette on the current theme: a users capsule, a calm and a busy bar, a failing dot. */
+function SignalTile({ s, theme, active, onClick, bar, lang }: { s: UfSignal; theme: UfTheme; active: boolean; onClick: () => void; bar: BarStyle; lang: 'ru' | 'en' }) {
+  const c = signalColors(s, theme.scheme);
+  return (
+    <UnstyledButton onClick={onClick} className="uf-theme uf-sig-tile" data-active={active || undefined} data-glow={s.glow || undefined}
+      style={signalVars(s, theme.scheme)}>
+      <Box className="uf-sig-sample" style={{ background: theme.surface, border: `1px solid ${theme.border}`, color: theme.text }}>
+        <span className="uf-users-pill" style={{ ['--c' as string]: c.ok, minWidth: 0 }}><IconUsers size={15} stroke={2} />870</span>
+        <Stack gap={6} style={{ flex: 1, minWidth: 0 }}>
+          <Group gap={6} wrap="nowrap"><Bar v={34} kind={bar} /><Bar v={81} kind={bar} /></Group>
+          <Group gap={6} wrap="nowrap"><Dot color={c.ok} size={8} /><Dot color={c.warn} size={8} /><Dot color={c.down} size={8} /></Group>
+        </Stack>
+      </Box>
+      <Group gap={6} mt={6} wrap="nowrap">
+        {active ? <IconCheck size={14} /> : <Text span c="dimmed" size="sm">—</Text>}
+        <Text size="sm" fw={active ? 650 : 400} truncate>{s.name[lang]}</Text>
+      </Group>
+    </UnstyledButton>
+  );
+}
+
 function FontTile({ f, active, onClick, sample, label }: { f: UfFont; active: boolean; onClick: () => void; sample: string; label: string }) {
   return (
     <UnstyledButton onClick={onClick} className="uf-theme uf-font-tile" data-active={active || undefined}>
@@ -55,6 +80,8 @@ export function ThemePicker({ opened, onClose }: { opened: boolean; onClose: () 
   const current = prefs.theme ?? THEMES[0].id;
   const font = prefs.font ?? DEFAULT_UI_FONT;
   const num = prefs.numFont ?? DEFAULT_NUM_FONT;
+  const signal = prefs.signal ?? SIGNALS[0].id;
+  const { lang } = useLang();
   useEffect(() => {
     if (opened) loadAllFonts(); // the samples are drawn in each font
   }, [opened]);
@@ -77,6 +104,17 @@ export function ThemePicker({ opened, onClose }: { opened: boolean; onClose: () 
             </SimpleGrid>
           </Stack>
         ))}
+
+        <Stack gap="xs">
+          <Text size="xs" fw={700} c="dimmed" tt="uppercase" style={{ letterSpacing: '0.06em' }}>{t('signal')}</Text>
+          <Text size="xs" c="dimmed" mt={-4}>{t('signal_hint')}</Text>
+          <SimpleGrid cols={{ base: 2, sm: 4 }} spacing="sm">
+            {SIGNALS.map((x) => (
+              <SignalTile key={x.id} s={x} theme={findTheme(current)} active={x.id === signal} onClick={() => setPrefs({ signal: x.id })}
+                bar={prefs.bar ?? 'pill'} lang={lang} />
+            ))}
+          </SimpleGrid>
+        </Stack>
 
         <Stack gap="xs">
           <Text size="xs" fw={700} c="dimmed" tt="uppercase" style={{ letterSpacing: '0.06em' }}>{t('font')}</Text>

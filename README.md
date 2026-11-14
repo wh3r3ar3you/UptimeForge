@@ -16,7 +16,7 @@ Down, blocked in a region, or failing at one ISP? UptimeForge checks from many n
 
 **English** · [Русский](README.ru.md)
 
-[Features](#-features) · [Screenshots](#-screenshots) · [Quick start](#-quick-start) · [Deploy on a VPS](#-deploy-on-a-vps) · [Configuration](#%EF%B8%8F-configuration) · [How verdicts work](#-how-verdicts-work)
+[Features](#-features) · [Checker agents](#-checker-agents) · [Screenshots](#-screenshots) · [Quick start](#-quick-start) · [Deploy on a VPS](#-deploy-on-a-vps) · [Configuration](#%EF%B8%8F-configuration) · [How verdicts work](#-how-verdicts-work)
 
 <img src="docs/screenshots/dashboard.png" alt="Dashboard" width="100%" />
 
@@ -73,10 +73,47 @@ UptimeForge runs real checks **from many networks at once** — your home ISP, d
 - **Node lost by the panel** — its own alert, folded with the node's agent.
 - **Server metrics** — CPU with steal and iowait, memory, disks, I/O, traffic, TCP; Zabbix-style thresholds that don't flap.
 - **Public status pages** — by check groups or by **VPN locations**: a flag, your name for it and a status, nothing internal.
+- **Live charts** — the server page opens on a **1 min** range: a point a second, streamed from the agent while the page is open.
 
 </td>
 </tr>
 </table>
+
+## 🌍 Checker agents
+
+A checker agent is a **volunteer probe point**: a home VM or a VPS at some ISP that checks your nodes the way that ISP's subscribers reach them. You invite a person with a one-time code; they run one command; a minute later the point shows up in *Checker agents* with a flag and an operator.
+
+<p align="center"><img src="docs/screenshots/checkers.png" alt="Checker agents" width="100%" /></p>
+
+**Inviting.** *Checker agents → Add point*: an optional name and a *trusted* switch. The hub shows one command with a *Copy* button. The code is single use, valid for 24 hours, and can be revoked in the *Invites* block.
+
+```sh
+curl -fsSL https://status.example.com/join.sh | sudo sh -s -- <CODE>
+```
+
+The script runs the agent in a locked-down Docker container (host network, read-only filesystem, no capabilities, 256 MB, half a CPU). If the machine has no Docker at all it installs it (Debian, Ubuntu, Fedora, CentOS/RHEL, Alpine); an existing engine is never touched. Where Docker cannot be had (a router, an unsupported system, no compose plugin) it installs the agent binary as a service instead. Running the command again on the same machine is safe: the agent starts with the token it already saved.
+
+**What makes it a checker, not a server**
+- **Untrusted by default.** An untrusted point never receives a check that carries a secret: Xray links and subscriptions, MTProto secrets, passwords, tokens, keys, headers and bodies. The check form shows such points as disabled with a hint. Turn *trusted* on only for people you would hand a VPN link to (the UI asks to confirm).
+- **Assigned explicitly.** A check runs on a checker only when its *Probes* selector names it: `id=…`, `role=checker`, `country=…`, `isp=…`. An empty list and `*` never include a checker, so adding a volunteer changes none of your existing checks. The picker has two groups: *Our infrastructure* and *Checker agents* (all of them, by country, by operator).
+- **Labels set themselves.** The hub looks up the agent's public address (honouring `UF_TRUSTED_PROXIES`) in the DB-IP country and ASN databases and sets `role=checker`, `country`, `asn` and `isp`. A label you set by hand is never overwritten; when the point changes network its labels and assignments follow. Only admins see the address.
+- **No host metrics.** A checker sends no CPU, memory or disk data, and the hub drops any it receives. Its page shows the network, version, assigned checks and recent results.
+- **Silent when offline.** A checker going offline or losing internet raises no alert: volunteers switch machines off. Its rows drop out of verdicts like any silent probe.
+
+Run a config from any point with *Config checker*; the secrets rule applies there too (an untrusted point answers "needs a trusted agent").
+
+## 🔄 Agent auto-update
+
+Agents installed from 0.2.0 on run under a small **launcher** (`uptimeforge-agent launch`: the Docker entrypoint, the systemd `ExecStart`) and update themselves from the hub.
+
+- **Signed releases.** The release workflow signs `checksums.txt` with an ed25519 key (`checksums.txt.sig`); the public key is built into the agent. An agent installs a binary only if the signature verifies, its sha256 is in the signed list and that list belongs to the version it was told (it names the release archive of that version), and only a version newer than the one it runs; any failed check leaves the old version running and the error visible in the UI. The hub image takes the agent binaries and the signature from the release of the same version, so the hub serves exactly the signed files. A hub without `checksums.txt.sig` in its agents dir rolls nothing out and says so in *Settings*.
+- **Rollback.** The new version must connect to the hub within 2 minutes; otherwise the launcher marks it bad and goes back to the previous one. The hub does not send that version to the agent again in this hub run; after a hub restart it may try once more.
+- **Manual rollback.** On the agent's machine append the version to `<state>/bad` (one per line), or delete `<state>/current`, and restart the agent: the launcher starts the previous version or the one it was installed with. The state dir is `/state` in Docker and `/var/lib/uptimeforge-agent` under systemd.
+- **Staged rollout.** The hub moves agents to its own version in steps: 1 agent, then 10%, then the rest, with a 10-minute soak between steps; the first two steps take agents on your servers before checkers. If an agent does not come back on the new version, keeps restarting on it or is back on an older one, the rollout halts and one `update:agents` incident (warning) names the agents; look at them and press *Resume* in *Settings*. A checker that is switched off does not halt anything: its step goes on without it.
+- **Mode.** *Settings → General*: update `all` agents, only `checkers`, or `off` (`agent_update: all|checkers|off` in the config file; default `all`). The same block shows the rollout: version, step, how many are updated, errors.
+- **What does not update itself.** Agents installed before 0.2.0 are marked "needs reinstall". A plain binary started by hand, Windows and macOS installs, and OpenWrt and Entware (no launcher: flash wear) do not self-update: update them by hand or reinstall. The hub image carries Linux agents only, so agents of other platforms are listed as having no build. A hub built as `dev` rolls nothing out, and dev builds never update themselves.
+
+For maintainers: the release key is generated with `go run ./tools/sign keygen`; its private half lives only in the `UF_RELEASE_KEY` repository secret, and `tools/sign` refuses a key that is not in `internal/update/keys.go`. The launcher never updates itself: it is the binary the agent was installed with, so its contract with the agents it starts is frozen (`UF_LAUNCHER`, `UF_LAUNCHER_BUILTIN`, exit code 75, the `connected-<version>` marker, the state dir layout; see `internal/update/launcher.go`).
 
 ## 📸 Screenshots
 
@@ -92,6 +129,9 @@ UptimeForge runs real checks **from many networks at once** — your home ISP, d
 <tr>
 <td><img src="docs/screenshots/incidents.png" alt="Incidents" /><br/><sub><b>Incidents</b> — history with causes and what each one affected</sub></td>
 <td><img src="docs/screenshots/templates.png" alt="Templates" /><br/><sub><b>Templates</b> — your own words for every alert, with a live preview</sub></td>
+</tr>
+<tr>
+<td colspan="2"><img src="docs/screenshots/checkers.png" alt="Checker agents" /><br/><sub><b>Checker agents</b> — volunteer points at other ISPs: operator, trust, assigned checks</sub></td>
 </tr>
 <tr>
 <td><img src="docs/screenshots/tools.png" alt="Config checker" /><br/><sub><b>Config checker</b> — try a link from every probe before adding it</sub></td>
@@ -203,6 +243,8 @@ Forgot the password: `docker compose exec hub uptimeforge-hub admin --username a
 |---|---|
 | `UF_HUB` | the hub's URL (`https://…`) |
 | `UF_TOKEN` | the agent's token from the UI |
+| `UF_JOIN` | a checker invite code (`--join`): exchanged for a token on first start, then not needed |
+| `UF_STATE_DIR` | where the agent keeps the token from `--join`, installed updates and their state (`/state` in Docker, `/var/lib/uptimeforge-agent` for the service) |
 | `UF_SOURCE_IP` | pin the source address used to reach the hub; `off` to disable the search |
 | `UF_METRICS_INTERVAL` | host metrics interval (default `15s`, `0` to disable) |
 | `UF_NIC` | interfaces counted as traffic (default: physical ones) |

@@ -1,14 +1,14 @@
 import { Box } from '@mantine/core';
 import type { Bar } from '../../api';
-import { status } from '../../theme';
+import { sig } from '../../theme';
 import type { ChecksT } from './text';
 
 /** barColor: grey without data, green all up, red for a down/blocked incident or mostly failing, amber otherwise. */
 export function barColor(b: Bar): string {
   if (!b.n) return 'var(--uf-track)';
-  if (b.worst === 'down' || b.worst === 'blocked' || b.up / b.n < 0.5) return status.down;
-  if (b.up === b.n) return status.ok;
-  return status.partial;
+  if (b.worst === 'down' || b.worst === 'blocked' || b.up / b.n < 0.5) return sig.down;
+  if (b.up === b.n) return sig.ok;
+  return sig.warn;
 }
 
 /**
@@ -26,7 +26,8 @@ export function PulseBar({ bars, from, step, t, onPick, compact }: {
       {bars.map((b, i) => (
         <span
           key={i}
-          style={{ background: barColor(b) }}
+          style={{ background: barColor(b), ['--c' as string]: barColor(b) }}
+          data-on={b.n ? '' : undefined}
           title={(b.n ? t('bar_tip', fmt(i), b.up, b.n) : t('bar_none', fmt(i))) + (b.worst ? ` · ${t('bar_incident', b.worst)}` : '')}
           onClick={onPick ? (e) => { e.stopPropagation(); onPick(from + i * step); } : undefined}
         />

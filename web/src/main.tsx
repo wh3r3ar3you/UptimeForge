@@ -15,7 +15,7 @@ import { reloadForNewVersion, RouteError } from './components/ErrorBoundary';
 import { LangProvider } from './i18n';
 import { PrefsProvider, usePrefs } from './prefs';
 import { applyFonts } from './fonts';
-import { cssVars, findTheme, mantineTheme } from './themes';
+import { cssVars, findSignal, findTheme, mantineTheme } from './themes';
 
 // A data router, so a page can hold the user back from leaving unsaved changes
 // (useBlocker); the app keeps its own descendant <Routes>.
@@ -32,10 +32,15 @@ function Themed() {
   const { prefs } = usePrefs();
   const t = findTheme(prefs.theme);
   const mt = useMemo(() => mantineTheme(t), [t]);
-  const vars = useMemo(() => cssVars(t), [t]);
+  const sig = findSignal(prefs.signal);
+  const vars = useMemo(() => cssVars(t, sig), [t, sig]);
   useEffect(() => {
     document.documentElement.dataset.ufTheme = t.id;
   }, [t]);
+  useEffect(() => {
+    if (sig.glow) document.documentElement.dataset.ufGlow = '';
+    else delete document.documentElement.dataset.ufGlow;
+  }, [sig]);
   useLayoutEffect(() => applyFonts(prefs.font, prefs.numFont), [prefs.font, prefs.numFont]);
   return (
     <MantineProvider theme={mt} forceColorScheme={t.scheme} cssVariablesResolver={vars}>

@@ -120,23 +120,49 @@ func (h *Hub) byID(id string) *model.Incident {
 	return nil
 }
 
-// IngestMetrics stores the latest host snapshot of a probe.
+// IngestSysInfo keeps what an agent says about its host. A checker's is
+// dropped, like its metrics.
+func (h *Hub) IngestSysInfo(probeID string, si proto.SysInfo) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if p := h.probes[probeID]; p != nil && !p.cfg.Checker() {
+		p.sysinfo = &si
+	}
+}
+
+// IngestMetrics takes a host snapshot of a probe: it becomes the probe's
+// latest, goes to its live watchers, and, at the usual rate, to storage and
+// host alerts (see storeDue; while live, what is stored is the aggregate of
+// the points since the last stored one).
 func (h *Hub) IngestMetrics(probeID string, m proto.Metrics) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	p := h.probes[probeID]
-	if p == nil {
-		return
+	if p == nil || p.cfg.Checker() {
+		return // a checker is someone else's machine: its host is none of our business
 	}
-	at, ok := measuredAt(time.Now(), m.Age)
+	at, ok := measuredAt(h.now(), m.Age)
 	if !ok || at.Before(p.metricsAt) {
 		return
 	}
+	prev := p.metricsAt
 	p.metrics, p.metricsAt = &m, at
-	if h.rec != nil {
-		h.rec.System(probeID, m)
+	fanOut(p, m)
+	gap := at.Sub(prev)
+	covers := max(gap, time.Millisecond)
+	if prev.IsZero() {
+		gap, covers = localMetricsInt, localMetricsInt
 	}
-	h.evalHost(p, m, at)
+	p.agg.add(m, covers.Seconds())
+	if !storeDue(p, at, gap) {
+		return
+	}
+	s := p.agg.result()
+	p.agg, p.storedAt = liveAgg{}, at
+	if h.rec != nil {
+		h.rec.System(probeID, s)
+	}
+	h.evalHost(p, s, at)
 }
 
 // RunOutcome is one probe's answer to a run-once request.
@@ -148,8 +174,14 @@ type RunOutcome struct {
 	Error  string         `json:"error,omitempty"`
 }
 
-// RunOnce runs spec right now on the given probes (all online ones if empty)
-// and waits for every answer: the "check this config from there" tool.
+// errNeedsTrusted is the run-once answer of an untrusted checker to a check
+// that carries secrets.
+const errNeedsTrusted = "needs a trusted agent: the check carries secrets"
+
+// RunOnce runs spec right now on the given probes and waits for every
+// answer: the "check this config from there" tool. No probes means every
+// probe but the checkers, which take part only when picked by id. An
+// untrusted checker is not sent a spec that carries secrets.
 func (h *Hub) RunOnce(ctx context.Context, spec checks.Spec, probeIDs []string) []RunOutcome {
 	if spec.ID == "" {
 		spec.ID = "_run"
@@ -164,13 +196,18 @@ func (h *Hub) RunOnce(ctx context.Context, spec checks.Spec, probeIDs []string) 
 
 	h.mu.Lock()
 	if len(probeIDs) == 0 {
-		probeIDs = append(probeIDs, h.probeOrder...)
+		for _, id := range h.probeOrder {
+			if p := h.probes[id]; p != nil && !p.cfg.Checker() {
+				probeIDs = append(probeIDs, id)
+			}
+		}
 	}
 	type target struct {
 		out RunOutcome
 		run func() (checks.Result, error)
 	}
 	var targets []target
+	secret := checks.CarriesSecrets(&spec)
 	for _, id := range probeIDs {
 		p := h.probes[id]
 		if p == nil {
@@ -178,6 +215,10 @@ func (h *Hub) RunOnce(ctx context.Context, spec checks.Spec, probeIDs []string) 
 		}
 		t := target{out: RunOutcome{Probe: id, Name: p.cfg.Name, Region: p.cfg.Labels[h.cfg.RegionLabel]}}
 		switch {
+		case secret && p.cfg.Checker() && !p.cfg.Trusted:
+			// Someone else's machine nobody vouched for gets no secrets, even on request.
+			t.out.Result = &checks.Result{CheckID: spec.ID, Status: checks.Down, Reason: "unavailable", At: time.Now(),
+				Error: errNeedsTrusted}
 		case p.runner != nil:
 			r := p.runner
 			t.run = func() (checks.Result, error) { return r.RunOnce(ctx, spec), nil }

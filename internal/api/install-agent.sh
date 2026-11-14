@@ -1,6 +1,7 @@
 #!/bin/sh
 # UptimeForge agent installer, served by your hub at /install.sh:
 #   curl -fsSL https://hub.example.com/install.sh | sudo UF_HUB=https://hub.example.com UF_TOKEN=xxxx sh
+# With an invite code instead of a token (UF_JOIN=code), the agent enrolls itself on first start.
 # Binaries come from the hub itself (/download), so GitHub is not needed; a
 # hub without the binary for this machine sends it to the GitHub release of
 # its own version. Either way the binary must match the published sha256.
@@ -16,7 +17,9 @@ RELEASES="${UF_RELEASES:-$default_releases}"
 DOWNLOAD="${UF_DOWNLOAD:-$UF_HUB/download}"
 BIN=/usr/local/bin/uptimeforge-agent
 
-[ -n "${UF_TOKEN:-}" ] || { echo "set UF_TOKEN (shown in the hub when you add a probe)" >&2; exit 1; }
+[ -n "${UF_TOKEN:-}" ] || [ -n "${UF_JOIN:-}" ] || { echo "set UF_TOKEN (shown in the hub when you add a probe) or UF_JOIN (an invite code)" >&2; exit 1; }
+case "${UF_JOIN:-}" in *[!A-Za-z0-9_-]*) echo "UF_JOIN is not an invite code" >&2; exit 1 ;; esac
+STATE_DIR=/var/lib/uptimeforge-agent
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 
 case "$UF_HUB" in
@@ -50,7 +53,9 @@ sha256() {
   fi
 }
 
-[ -d /opt/bin ] && [ ! -d /usr/local/bin ] && BIN=/opt/bin/uptimeforge-agent # Entware
+systemd=""
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then systemd=1; fi
+[ -z "$systemd" ] && [ -d /opt/bin ] && [ ! -d /usr/local/bin ] && BIN=/opt/bin/uptimeforge-agent # Entware
 mkdir -p "$(dirname "$BIN")"
 name="uptimeforge-agent_linux_$arch"
 tmp="$(mktemp)"
@@ -77,11 +82,18 @@ echo "sha256 OK: $got"
 chmod 0755 "$tmp"
 mv "$tmp" "$BIN"
 
-if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+if [ -n "$systemd" ]; then
+  # The launcher runs the agent and installs the hub's signed updates under
+  # $STATE_DIR/bin (StateDirectory: owned by the service user, exec allowed).
   id uptimeforge >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin uptimeforge
   umask 077
   mkdir -p /etc/uptimeforge
-  printf 'UF_HUB=%s\nUF_TOKEN=%s\n' "$UF_HUB" "$UF_TOKEN" > /etc/uptimeforge/agent.env
+  {
+    printf 'UF_HUB=%s\nUF_STATE_DIR=%s\n' "$UF_HUB" "$STATE_DIR"
+    [ -z "${UF_TOKEN:-}" ] || printf 'UF_TOKEN=%s\n' "$UF_TOKEN"
+    [ -z "${UF_JOIN:-}" ] || printf 'UF_JOIN=%s\n' "$UF_JOIN"
+    [ "${UF_INSECURE:-}" != 1 ] || printf 'UF_INSECURE=1\n'
+  } > /etc/uptimeforge/agent.env
   chown root:uptimeforge /etc/uptimeforge/agent.env
   chmod 0640 /etc/uptimeforge/agent.env
   cat > /etc/systemd/system/uptimeforge-agent.service <<UNIT
@@ -92,7 +104,7 @@ Wants=network-online.target
 
 [Service]
 EnvironmentFile=/etc/uptimeforge/agent.env
-ExecStart=$BIN
+ExecStart=/usr/local/bin/uptimeforge-agent launch
 User=uptimeforge
 Restart=always
 RestartSec=5
@@ -100,6 +112,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+StateDirectory=uptimeforge-agent
 
 [Install]
 WantedBy=multi-user.target
@@ -112,12 +125,20 @@ UNIT
 fi
 
 # No systemd: Entware (/opt/etc/init.d) or plain init.d (OpenWrt).
+# No launcher here: the state dir is on flash, and the updates it keeps (two more 10-20 MB binaries) would wear and fill it.
 initdir=/etc/init.d
 [ -d /opt/etc/init.d ] && initdir=/opt/etc/init.d
+# /var is tmpfs on OpenWrt: keep the token on flash (Entware lives on /opt).
+STATE_DIR=/etc/uptimeforge-agent
+[ "$initdir" != /opt/etc/init.d ] || STATE_DIR=/opt/var/lib/uptimeforge-agent
+umask 077
+mkdir -p "$STATE_DIR"
+insecure=""
+[ "${UF_INSECURE:-}" != 1 ] || insecure="UF_INSECURE=1"
 cat > "$initdir/S99uptimeforge-agent" <<INIT
 #!/bin/sh
 case "\$1" in
-  start) UF_HUB='$UF_HUB' UF_TOKEN='$UF_TOKEN' nohup $BIN >/tmp/uptimeforge-agent.log 2>&1 & ;;
+  start) UF_HUB='$UF_HUB' UF_TOKEN='${UF_TOKEN:-}' UF_JOIN='${UF_JOIN:-}' UF_STATE_DIR='$STATE_DIR' $insecure nohup $BIN >/tmp/uptimeforge-agent.log 2>&1 & ;;
   stop) killall uptimeforge-agent 2>/dev/null ;;
   restart) "\$0" stop; sleep 1; "\$0" start ;;
 esac

@@ -1,0 +1,246 @@
+package update
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"syscall"
+	"time"
+
+	"github.com/wh3r3ar3you/uptimeforge/internal/version"
+)
+
+// The launcher never updates itself: it is the binary the agent was
+// installed with (the Docker image, the systemd unit's binary), and it keeps
+// running whatever version it starts. So its contract with the agents it
+// starts is frozen; a future agent must keep honouring it, and a future
+// launcher must keep offering it:
+//
+//   - the child runs with UF_LAUNCHER=1 (it may install updates) and
+//     UF_LAUNCHER_BUILTIN=<launcher version> (it refuses a version this
+//     launcher would not select: not newer than the builtin);
+//   - exit code 75 (ExitRestart) means "an update is installed: choose again
+//     and start at once"; any other exit is restarted with a backoff;
+//   - connected-<version> in the state dir, written by that version once the
+//     hub has assigned it work, ends its health watch; without it within
+//     HealthWait the version is marked bad;
+//   - the state dir layout (install.go): bin/<version>/uptimeforge-agent,
+//     current, previous, bad, connected-<version>.
+//
+// Manual rollback: append the version to <state>/bad (or delete
+// <state>/current) and restart the agent; Choose then picks the previous
+// version, else the builtin.
+//
+// Only launcher installs update themselves (Docker, systemd). A plain binary
+// started by hand, Windows and macOS installs and OpenWrt/Entware (no
+// launcher: flash wear) are updated by hand or reinstalled.
+
+const (
+	// HealthWait is how long a newly installed version has, from its first
+	// start, to report a hub connection before it is rolled back.
+	HealthWait = 2 * time.Minute
+	// ExitRestart is the exit code by which the agent tells the launcher it
+	// installed an update: read the choice again and start at once.
+	ExitRestart = 75
+	// stopWait is how long a child has to exit after SIGTERM.
+	stopWait = 10 * time.Second
+)
+
+// Choose picks the binary to run: current, else previous, if it is not
+// rolled back, is installed and is strictly newer than the builtin binary
+// (the one the launcher itself is); otherwise the builtin. A dev builtin
+// always runs itself, and the builtin is never rolled back.
+func Choose(stateDir, builtin, builtinVersion string) (path, version string) {
+	if !IsRelease(builtinVersion) {
+		return builtin, builtinVersion
+	}
+	bad := readBad(stateDir)
+	for _, name := range []string{"current", "previous"} {
+		v := readVersion(stateDir, name)
+		if v == "" || bad[v] || Compare(v, builtinVersion) <= 0 {
+			continue
+		}
+		if p := binPath(stateDir, v); isFile(p) {
+			return p, v
+		}
+	}
+	return builtin, builtinVersion
+}
+
+// Launch runs the agent chosen by Choose as a child with args until ctx is
+// cancelled, then stops the child and returns nil. builtin is the launcher's
+// own binary. The child runs with UF_LAUNCHER=1 and the launcher's stdout
+// and stderr. Exit 75 starts the new choice at once; any other exit restarts
+// it after a backoff (1 s doubling to 30 s, reset after a minute of running).
+// An installed version that has not written connected-<version> within
+// HealthWait of its first start is killed, marked bad and replaced by the
+// next choice; crashes in that window count toward the same deadline.
+func Launch(ctx context.Context, stateDir, builtin string, args []string) error {
+	l := &launcher{
+		stateDir: stateDir, builtin: builtin, builtinVersion: version.Version, args: args,
+		healthWait: HealthWait, minBackoff: time.Second, maxBackoff: 30 * time.Second, stable: time.Minute,
+		log: slog.Default(),
+	}
+	return l.run(ctx)
+}
+
+type launcher struct {
+	stateDir, builtin, builtinVersion string
+	args                              []string
+	healthWait                        time.Duration
+	minBackoff, maxBackoff, stable    time.Duration
+	log                               *slog.Logger
+}
+
+var (
+	// errUnhealthy ends a child that did not connect in time.
+	errUnhealthy = errors.New("no hub connection within the health window")
+	// errStart wraps a child that could not be started at all.
+	errStart = errors.New("cannot start")
+)
+
+func (l *launcher) run(ctx context.Context) error {
+	if l.builtin == "" {
+		return errors.New("launcher: no builtin agent binary")
+	}
+	firstStart := map[string]time.Time{} // per watched version, in this run
+	backoff := l.minBackoff
+	for ctx.Err() == nil {
+		path, v := Choose(l.stateDir, l.builtin, l.builtinVersion)
+		var deadline time.Time // zero: not watched
+		if path != l.builtin && !l.connected(v) {
+			first, ok := firstStart[v]
+			if !ok {
+				first = time.Now()
+				firstStart[v] = first
+			}
+			deadline = first.Add(l.healthWait)
+			if !time.Now().Before(deadline) {
+				l.rollBack(v, firstStart)
+				continue
+			}
+		}
+
+		started := time.Now()
+		code, err := l.runChild(ctx, path, v, deadline)
+		switch {
+		case ctx.Err() != nil:
+			return nil
+		case path != l.builtin && (errors.Is(err, errUnhealthy) || errors.Is(err, errStart)):
+			if errors.Is(err, errStart) {
+				l.log.Error("installed agent cannot be started", "version", v, "err", err)
+			}
+			l.rollBack(v, firstStart)
+			backoff = l.minBackoff
+			continue
+		case code == ExitRestart:
+			// Only a new choice deserves an immediate start: the same one
+			// again would spin (an update this launcher does not select).
+			if p, nv := Choose(l.stateDir, l.builtin, l.builtinVersion); p != path || nv != v {
+				l.log.Info("agent restarts into a new choice", "from", v, "to", nv)
+				backoff = l.minBackoff
+				continue
+			}
+			l.log.Warn("update installed but not selected", "version", v)
+		}
+		if time.Since(started) >= l.stable {
+			backoff = l.minBackoff
+		}
+		wait := backoff
+		if !deadline.IsZero() {
+			wait = max(0, min(wait, time.Until(deadline)))
+		}
+		l.log.Warn("agent exited", "version", v, "code", code, "err", err, "restart_in", wait)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(wait):
+		}
+		backoff = min(backoff*2, l.maxBackoff)
+	}
+	return nil
+}
+
+func (l *launcher) connected(v string) bool {
+	_, err := os.Stat(filepath.Join(l.stateDir, ConnectedMarker(v)))
+	return err == nil
+}
+
+// rollBack marks v bad; the next Choose falls back past it. Its health
+// window is forgotten, so an explicit re-install gets a fresh one.
+func (l *launcher) rollBack(v string, firstStart map[string]time.Time) {
+	l.log.Error("agent version never connected to the hub: rolling back", "version", v, "within", l.healthWait)
+	if err := setBad(l.stateDir, v, true); err != nil {
+		l.log.Error("cannot mark the version bad", "version", v, "err", err)
+	}
+	delete(firstStart, v)
+}
+
+// runChild runs one child until it exits (its exit code), ctx is cancelled
+// or, when deadline is set, the deadline passes without its connected
+// marker (errUnhealthy). In the last two cases the child is stopped first.
+func (l *launcher) runChild(ctx context.Context, path, v string, deadline time.Time) (int, error) {
+	cmd := exec.Command(path, l.args...)
+	// The child refuses updates this launcher would not select (see
+	// agent.Config.LauncherBuiltin).
+	cmd.Env = append(os.Environ(), "UF_LAUNCHER=1", "UF_LAUNCHER_BUILTIN="+l.builtinVersion)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	cmd.SysProcAttr = childAttr()
+	if err := cmd.Start(); err != nil {
+		return -1, fmt.Errorf("%w: %w", errStart, err)
+	}
+	l.log.Info("agent started", "version", v, "path", path, "pid", cmd.Process.Pid)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	var health <-chan time.Time
+	if !deadline.IsZero() {
+		t := time.NewTimer(time.Until(deadline))
+		defer t.Stop()
+		health = t.C
+	}
+	for {
+		select {
+		case err := <-done:
+			var ee *exec.ExitError
+			switch {
+			case err == nil:
+				return 0, nil
+			case errors.As(err, &ee):
+				return ee.ExitCode(), err
+			}
+			return -1, err
+		case <-ctx.Done():
+			stop(cmd.Process, done)
+			return -1, ctx.Err()
+		case <-health:
+			if l.connected(v) {
+				health = nil
+				continue
+			}
+			stop(cmd.Process, done)
+			return -1, errUnhealthy
+		}
+	}
+}
+
+// stop asks the child to exit (SIGTERM; Windows has only Kill) and kills it
+// if it is still there after stopWait. done delivers its Wait.
+func stop(p *os.Process, done <-chan error) {
+	if runtime.GOOS == "windows" {
+		p.Kill()
+	} else {
+		p.Signal(syscall.SIGTERM)
+	}
+	select {
+	case <-done:
+	case <-time.After(stopWait):
+		p.Kill()
+		<-done
+	}
+}

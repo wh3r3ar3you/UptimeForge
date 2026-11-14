@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -116,13 +117,17 @@ func (h *Hub) handleAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ac := &agentConn{conn: conn, assign: make(chan []byte, 1), out: make(chan []byte, 16), cancel: cancel}
-	if !h.attach(p, ac, hello, hash) {
+	ip := ClientIP(r)
+	if !h.attach(p, ac, hello, hash, ip) {
 		conn.Close(websocket.StatusPolicyViolation, "probe token revoked")
 		return
 	}
 	defer h.detach(p, ac)
-	log := h.log.With("probe", id, "remote", r.RemoteAddr)
+	log := h.log.With("probe", id, "remote", ip.String())
 	log.Info("agent connected", "version", hello.Version, "host", hello.Hostname, "os", hello.OS+"/"+hello.Arch)
+	if h.OnAgentAddr != nil && ip.IsValid() {
+		h.OnAgentAddr(id, ip)
+	}
 
 	go func() {
 		ping := time.NewTicker(30 * time.Second)
@@ -186,14 +191,17 @@ func (h *Hub) handleAgent(w http.ResponseWriter, r *http.Request) {
 		case proto.TypeSysInfo:
 			var si proto.SysInfo
 			if json.Unmarshal(env.Data, &si) == nil {
-				h.mu.Lock()
-				p.sysinfo = &si
-				h.mu.Unlock()
+				h.IngestSysInfo(id, si)
 			}
 		case proto.TypeRunResult:
 			var rr proto.RunResult
 			if json.Unmarshal(env.Data, &rr) == nil {
 				h.runResult(rr)
+			}
+		case proto.TypeUpdateResult:
+			var ur proto.UpdateResult
+			if json.Unmarshal(env.Data, &ur) == nil {
+				h.updateResult(id, ur)
 			}
 		}
 	}
@@ -201,8 +209,10 @@ func (h *Hub) handleAgent(w http.ResponseWriter, r *http.Request) {
 
 // attach makes ac the probe's connection. The token is checked again here,
 // under the lock: it may have been rotated, or the probe removed or made
-// virtual, while the agent was still in the handshake.
-func (h *Hub) attach(p *probe, ac *agentConn, hello proto.Hello, tokenHash string) bool {
+// virtual, while the agent was still in the handshake. ip is where the agent
+// connects from; from another address its network is unknown until
+// SetNetwork.
+func (h *Hub) attach(p *probe, ac *agentConn, hello proto.Hello, tokenHash string, ip netip.Addr) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.probes[p.cfg.ID] != p || p.cfg.Virtual() || p.cfg.TokenHash == "" ||
@@ -214,10 +224,21 @@ func (h *Hub) attach(p *probe, ac *agentConn, hello proto.Hello, tokenHash strin
 	}
 	now := time.Now()
 	p.conn, p.online, p.since, p.hello = ac, true, now, hello
+	if ip = ip.Unmap(); ip != p.addr {
+		p.addr, p.network = ip, nil
+		if ip.IsValid() {
+			p.network = &NetworkView{IP: ip.String(), At: now}
+		}
+	}
 	h.seen[p.cfg.ID] = true
 	p.lastAssign = nil
 	h.transition("probe:"+p.cfg.ID, model.KindOK, "", nil, meta{}, now)
 	h.pushAssignments()
+	if len(p.watchers) > 0 {
+		h.renewLive(p) // someone is already watching: no need to wait for the next renewal
+	}
+	h.rolloutAttached(p.cfg.ID)
+	h.rolloutStep(h.now()) // back from an update, or due for one
 	return true
 }
 
@@ -230,6 +251,7 @@ func (h *Hub) detach(p *probe, ac *agentConn) {
 	now := time.Now()
 	p.conn, p.online, p.since = nil, false, now
 	h.evaluateAll(now)
+	h.rolloutStep(h.now()) // an agent told to update is missing from now
 }
 
 // Status is the read model for the API and, later, the web UI.
@@ -256,6 +278,10 @@ type ProbeStatus struct {
 	MetricsAt time.Time         `json:"metrics_at,omitzero"`
 	Checks    int               `json:"checks"`
 	Failing   int               `json:"failing"`
+	// Network is where an agent connects from (nil until it has).
+	Network *NetworkView `json:"network,omitempty"`
+	// RemnawaveNode is the panel node the server is linked to by hand.
+	RemnawaveNode string `json:"remnawave_node,omitempty"`
 }
 
 type CheckStatus struct {
@@ -295,11 +321,17 @@ func (h *Hub) Snapshot() Status {
 		} else if p.cfg.Local {
 			mode = "local"
 		}
-		ps := ProbeStatus{ID: id, Name: p.cfg.Name, Labels: p.cfg.Labels, Region: p.cfg.Labels[h.cfg.RegionLabel], Mode: mode,
-			Online: p.online, Internet: !p.noNet, Since: p.since, Version: p.hello.Version, Host: p.hello.Hostname,
-			SysInfo: p.sysinfo, Metrics: p.metrics, MetricsAt: p.metricsAt}
+		ps := ProbeStatus{ID: id, Name: p.cfg.Name, RemnawaveNode: p.cfg.RemnawaveNode, Labels: p.cfg.Labels, Region: p.cfg.Labels[h.cfg.RegionLabel], Mode: mode,
+			Online: p.online, Internet: !p.noNet, Since: p.since, Version: p.hello.Version, Host: p.hello.Hostname}
+		if !p.cfg.Checker() { // someone else's machine: its host stays its owner's
+			ps.SysInfo, ps.Metrics, ps.MetricsAt = p.sysinfo, p.metrics, p.metricsAt
+		}
 		if p.cfg.Local {
 			ps.Version = version.Version
+		}
+		if p.network != nil {
+			n := *p.network
+			ps.Network = &n
 		}
 		for _, cid := range h.checkOrder {
 			ch := h.checks[cid]

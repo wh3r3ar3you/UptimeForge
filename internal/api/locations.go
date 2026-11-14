@@ -76,7 +76,7 @@ func nodeStatus(n remnawave.Node, snap hub.Status) string {
 		}
 	}
 	for _, p := range snap.Probes {
-		if !p.Online && (hub.NodeKey(p.Name) == hub.NodeKey(n.Name) || hub.NodeKey(p.ID) == hub.NodeKey(n.Name)) {
+		if !p.Online && hub.IsNodeProbe(p.Ref(), nodeRef(n)) {
 			return "outage"
 		}
 	}
@@ -246,7 +246,7 @@ func (s *Server) fillUptime(ctx context.Context, rows []publicLocation, probes [
 	keysOf := func(n remnawave.Node) []string {
 		keys := []string{"rw:" + n.UUID}
 		for _, p := range probes {
-			if hub.NodeKey(p.Name) == hub.NodeKey(n.Name) || hub.NodeKey(p.ID) == hub.NodeKey(n.Name) {
+			if hub.IsNodeProbe(p.Ref(), nodeRef(n)) {
 				keys = append(keys, "probe:"+p.ID)
 			}
 		}
@@ -351,4 +351,13 @@ func (s *Server) publicLocations(ctx context.Context, p StatusPage) (map[string]
 	}
 	return map[string]any{"title": p.Title, "description": p.Description, "kind": "locations", "mode": cmp.Or(cfg.Mode, "country"),
 		"status": overall, "locations": rows, "updated": time.Now()}, nil
+}
+
+// nodeRef is a panel node as servers are matched to it.
+func nodeRef(n remnawave.Node) hub.NodeRef {
+	ref := hub.NodeRef{ID: n.UUID, Name: n.Name, Address: n.Address}
+	for _, ip := range n.IPs {
+		ref.IPs = append(ref.IPs, ip.IP)
+	}
+	return ref
 }

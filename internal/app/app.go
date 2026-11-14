@@ -64,7 +64,11 @@ type App struct {
 	rec       *recorder
 	rw        remnawaveState
 	nodes     nodeSnapshot
-	geo       countryDB
+	addrs     nodeAddrs // what the nodes' host names resolve to
+	geo       geoDB
+	geoNeed   chan struct{} // wakes keepGeo: something wants a lookup
+
+	inviteMu sync.Mutex // one invite change at a time: a code is spent once
 }
 
 const (
@@ -84,7 +88,8 @@ func New(opt Options, log *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{Opt: opt, Log: log, Store: st, rec: newRecorder(), geo: &geoip.DB{Dir: filepath.Join(opt.DataDir, "geoip")}}
+	a := &App{Opt: opt, Log: log, Store: st, rec: newRecorder(), geo: &geoip.DB{Dir: filepath.Join(opt.DataDir, "geoip"), LookupOnly: true},
+		geoNeed: make(chan struct{}, 1)}
 	a.managed.probes, a.managed.checks, a.managed.sections = map[string]bool{}, map[string]bool{}, map[string]bool{}
 
 	if opt.ConfigPath != "" {
@@ -123,6 +128,7 @@ func New(opt Options, log *slog.Logger) (*App, error) {
 	a.Hub.Restore(open, mutes)
 	a.Hub.SetRecorder(a.rec)
 	a.Hub.SetEnricher(a.enrichIncident)
+	a.Hub.OnAgentAddr = a.agentAddr
 	if seen, err := a.Store.ProbesSeen(context.Background()); err == nil {
 		a.Hub.MarkSeen(seen)
 	} else {
@@ -141,7 +147,7 @@ func (a *App) markManaged() {
 	}
 	set := map[string]bool{
 		SectionGeneral: f.Timezone != "" || f.Lang != "" || f.RegionLabel != "" || f.OfflineGrace != 0 ||
-			f.Defaults != (hub.Defaults{}) || f.Baseline != nil || f.PublicURL != "",
+			f.Defaults != (hub.Defaults{}) || f.Baseline != nil || f.PublicURL != "" || f.AgentUpdate != "",
 		SectionAlerts:    f.Alerts.QuietHours != "" || f.Alerts.RemindEvery != nil || f.Alerts.Host != nil,
 		SectionHeartbeat: f.Heartbeat.URL != "",
 		SectionTelegram:  f.Telegram != nil,
@@ -215,6 +221,9 @@ func (a *App) compose(ctx context.Context, ov *override) (*hub.Config, error) {
 			}
 			if f.PublicURL != "" {
 				c.PublicURL = f.PublicURL
+			}
+			if f.AgentUpdate != "" {
+				c.AgentUpdate = f.AgentUpdate
 			}
 		}
 		if a.managed.sections[SectionAlerts] {
@@ -320,8 +329,9 @@ func (a *App) Run(ctx context.Context) error {
 	a.mu.Unlock()
 
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4)
 	go func() { defer wg.Done(); a.rec.run(ctx, a.Store, a.Log) }()
+	go func() { defer wg.Done(); a.keepGeo(ctx, sleepCtx) }()
 	go func() { defer wg.Done(); a.pollRemnawave(ctx) }()
 	go func() { defer wg.Done(); a.reportLoop(ctx) }()
 	err := a.Hub.Run(ctx)

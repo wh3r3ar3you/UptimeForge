@@ -4,7 +4,7 @@ import {
 import { useDisclosure } from '@mantine/hooks';
 import {
   IconActivityHeartbeat, IconAlertTriangle, IconBell, IconTemplate, IconLayoutDashboard, IconPalette,
-  IconSettings, IconShieldCheck, IconUsers, IconWorldWww, IconFlask2, IconAffiliate,
+  IconSettings, IconShieldCheck, IconUsers, IconWorldWww, IconFlask2, IconAffiliate, IconWorldSearch,
 } from '@tabler/icons-react';
 import { useEffect, useId, type ComponentType, type ReactNode } from 'react';
 import { NavLink as RouterLink, useLocation } from 'react-router';
@@ -16,14 +16,14 @@ import { ThemePicker } from './ThemePicker';
 
 const L = {
   ru: {
-    overview: 'Обзор', home: 'Главная', monitoring: 'Мониторинг', checks: 'Проверки', probes: 'Серверы и пробы', incidents: 'Инциденты',
+    overview: 'Обзор', home: 'Главная', monitoring: 'Мониторинг', checks: 'Проверки', probes: 'Серверы и пробы', checkers: 'Агенты проверок', incidents: 'Инциденты',
     tools: 'Инструменты', checker: 'Проверка конфигов', remnawave: 'Remnawave',
     settings: 'Настройки', status_pages: 'Статус-страницы', users: 'Пользователи', general: 'Общие',
     theme: 'Внешний вид', alerts: 'Уведомления', rules: 'Правила', templates: 'Шаблоны',
     open_menu: 'Открыть меню', close_menu: 'Закрыть меню',
   },
   en: {
-    overview: 'Overview', home: 'Dashboard', monitoring: 'Monitoring', checks: 'Checks', probes: 'Servers & probes', incidents: 'Incidents',
+    overview: 'Overview', home: 'Dashboard', monitoring: 'Monitoring', checks: 'Checks', probes: 'Servers & probes', checkers: 'Checker agents', incidents: 'Incidents',
     tools: 'Tools', checker: 'Config checker', remnawave: 'Remnawave',
     settings: 'Settings', status_pages: 'Status pages', users: 'Users', general: 'General',
     theme: 'Appearance', alerts: 'Notifications', rules: 'Rules', templates: 'Templates',
@@ -117,6 +117,7 @@ export function Layout({ children }: { children: ReactNode }) {
           <Item to="/" icon={IconLayoutDashboard} label={t('home')} onClick={close} />
           <div className="uf-nav-section">{t('monitoring')}</div>
           <Item to="/checks" icon={IconShieldCheck} label={t('checks')} onClick={close} />
+          <Item to="/checkers" icon={IconWorldSearch} label={t('checkers')} onClick={close} />
           <Item to="/telegram-proxy" icon={TelegramLogo} label="Telegram Proxy" onClick={close} />
           <Item
             to="/incidents"

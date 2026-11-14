@@ -4,7 +4,7 @@ import {
 } from '@tabler/icons-react';
 import type { ReactNode } from 'react';
 import { pct } from '../../format';
-import { status } from '../../theme';
+import { sig } from '../../theme';
 import { TelegramLogo } from '../TelegramLogo';
 import type { CheckGroup } from './grouping';
 import type { ChecksT, Count } from './text';
@@ -44,7 +44,7 @@ export function CheckGroupCard({ group, open, onToggle, t, count, select, childr
           <TypeIcon type={group.type} />
           <Text fw={700} fz={15} truncate>{group.title}</Text>
           <Text size="sm" c="dimmed" style={{ flex: 'none' }}>{count(real, 'w_check')}</Text>
-          <Text size="sm" fw={group.problems ? 650 : 500} c={group.problems ? status.down : status.ok} style={{ flex: 'none' }}>
+          <Text size="sm" fw={group.problems ? 650 : 500} c={group.problems ? sig.down : sig.ok} style={{ flex: 'none' }}>
             · {group.problems ? t('n_problems', group.problems) : t('all_ok')}
           </Text>
           <Group gap={6} ml="auto" wrap="nowrap" visibleFrom="sm">

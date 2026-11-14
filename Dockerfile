@@ -17,14 +17,38 @@ ARG TARGETOS TARGETARCH
 ENV CGO_ENABLED=0
 RUN LDFLAGS="-s -w -X github.com/wh3r3ar3you/uptimeforge/internal/version.Version=${VERSION}" && \
     GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "$LDFLAGS" -o /out/uptimeforge-hub ./cmd/uptimeforge-hub && \
-    GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "$LDFLAGS" -o /out/uptimeforge-agent ./cmd/uptimeforge-agent && \
-    mkdir -p /out/agents && \
-    for t in amd64:amd64: arm64:arm64: armv7:arm:7 mips:mips: mipsle:mipsle:; do \
-      name=${t%%:*}; rest=${t#*:}; arch=${rest%%:*}; arm=${rest#*:}; \
-      case $name in amd64|arm64) tags="";; *) tags=lite;; esac; \
-      GOOS=linux GOARCH=$arch GOARM=$arm GOMIPS=softfloat go build -trimpath -ldflags "$LDFLAGS" \
-        -tags "$tags" -o /out/agents/uptimeforge-agent_linux_$name ./cmd/uptimeforge-agent; \
-    done
+    GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "$LDFLAGS" -o /out/uptimeforge-agent ./cmd/uptimeforge-agent
+
+# The agent binaries the hub image serves for installers and self-update. Not
+# per target platform: pinned to the build platform, and the same for the
+# linux/amd64 and linux/arm64 hub images, so it runs once.
+#
+# AGENTS_FROM (the release download URL, e.g.
+# https://github.com/OWNER/REPO/releases/download/v1.2.3) takes the signed
+# release binaries with checksums.txt and checksums.txt.sig, and fails the build
+# if anything is missing, a sha256 differs or the signature is not by a release
+# key built into the agent. Without it the agents are built from source: a
+# development image with no signature.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS agents
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+ARG AGENTS_FROM=
+ENV CGO_ENABLED=0
+RUN mkdir -p /out/agents && \
+    if [ -n "$AGENTS_FROM" ]; then \
+      apk add --no-cache curl && sh deploy/fetch-agents.sh "$AGENTS_FROM" /out/agents; \
+    else \
+      LDFLAGS="-s -w -X github.com/wh3r3ar3you/uptimeforge/internal/version.Version=${VERSION}" && \
+      for t in amd64:amd64: arm64:arm64: armv7:arm:7 mips:mips: mipsle:mipsle:; do \
+        name=${t%%:*}; rest=${t#*:}; arch=${rest%%:*}; arm=${rest#*:}; \
+        case $name in amd64|arm64) tags="";; *) tags=lite;; esac; \
+        GOOS=linux GOARCH=$arch GOARM=$arm GOMIPS=softfloat go build -trimpath -ldflags "$LDFLAGS" \
+          -tags "$tags" -o /out/agents/uptimeforge-agent_linux_$name ./cmd/uptimeforge-agent || exit 1; \
+      done; \
+    fi
 
 FROM alpine:3.22 AS base
 ARG VERSION=dev
@@ -42,7 +66,7 @@ COPY LICENSE THIRD_PARTY_LICENSES* /usr/share/doc/uptimeforge/
 # The hub: web UI, API, alerting, history, and agent binaries for installers.
 FROM base AS hub
 COPY --from=build /out/uptimeforge-hub /usr/local/bin/
-COPY --from=build /out/agents /usr/share/uptimeforge/agents
+COPY --from=agents /out/agents /usr/share/uptimeforge/agents
 ENV UF_DATA_DIR=/data UF_LISTEN=:8080
 USER uptimeforge
 VOLUME /data
@@ -52,5 +76,12 @@ ENTRYPOINT ["uptimeforge-hub"]
 
 FROM base AS agent
 COPY --from=build /out/uptimeforge-agent /usr/local/bin/
+# The token obtained with an invite code and the updates the launcher installs
+# (bin/) live in a volume mounted here: a new named volume takes the owner of
+# this directory.
+RUN mkdir /state && chown uptimeforge /state
+ENV UF_STATE_DIR=/state
 USER uptimeforge
-ENTRYPOINT ["uptimeforge-agent"]
+VOLUME /state
+# The launcher runs the agent as its child and swaps in the hub's signed updates.
+ENTRYPOINT ["uptimeforge-agent", "launch"]

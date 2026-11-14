@@ -73,6 +73,12 @@ func (f *Formatter) RichIncident(inc *model.Incident, now time.Time) string {
 // resolvedTitle: a recovery is "recovered"; a manual close only says it was
 // closed, since the thing may still be broken.
 func (f *Formatter) resolvedTitle(inc *model.Incident) (emoji, title string) {
+	if inc.Type == "update" && inc.Note == "update_stopped" {
+		return "⏹", f.t("update_closed")
+	}
+	if updateClosedWithoutReturn(inc) {
+		return "☑️", f.t("update_done")
+	}
 	if inc.ResolvedBy != "" {
 		return "☑️", f.t("closed")
 	}
@@ -87,6 +93,8 @@ func (f *Formatter) resolvedLines(inc *model.Incident) []string {
 	}
 	if inc.Note == "removed" {
 		switch inc.Type {
+		case "update":
+			lines = append(lines, f.t("update_removed"))
 		case "users":
 			lines = append(lines, f.t("users_removed"))
 		case "host":
@@ -107,12 +115,19 @@ func (f *Formatter) resolvedLines(inc *model.Incident) []string {
 		lines = append(lines, f.t("was", was, esc(f.Duration(inc.Resolved.Sub(inc.Started)))))
 	case inc.Type == "users" && inc.Drop != nil:
 		lines = append(lines, f.t("was", was, f.t("users_low", groupDigits(inc.Drop.Low), groupDigits(inc.Drop.Before))))
-	case inc.Type != "probe" && inc.Type != "subscription" && inc.Type != "host" && inc.Type != "users":
+	case inc.Type != "probe" && inc.Type != "subscription" && inc.Type != "host" && inc.Type != "users" && inc.Type != "update":
 		lines = append(lines, f.t("was", was, f.t("probes_failing", inc.PeakFailing, inc.PeakTotal)))
 	default:
 		lines = append(lines, f.t("was", was, esc(f.Duration(inc.Resolved.Sub(inc.Started)))))
 	}
-	if inc.ResolvedBy != "" {
+	switch {
+	case inc.Type == "update" && inc.Note == "resumed":
+		lines = append(lines, f.t("update_resumed", esc(inc.ResolvedBy)))
+	case inc.Type == "update" && inc.Note == "update_stopped":
+		lines = append(lines, f.t("update_stopped"))
+	case inc.Type == "update" && (inc.Note == "update_left" || inc.Note == "update_refused" || inc.Note == "update_settled"):
+		lines = append(lines, f.t(inc.Note))
+	case inc.ResolvedBy != "":
 		lines = append(lines, f.t("closed_by", esc(inc.ResolvedBy)))
 	}
 	if inc.AckBy != "" {
@@ -129,4 +144,14 @@ func (f *Formatter) RichResolved(inc *model.Incident) string {
 // RichTest is the test message in rich form.
 func (f *Formatter) RichTest(event string) string {
 	return "<p>" + f.Test(event) + "</p>"
+}
+
+// updateClosedWithoutReturn: the agents of a halted rollout did not come
+// back on the new version; they were deleted, moved on or refused it.
+func updateClosedWithoutReturn(inc *model.Incident) bool {
+	switch inc.Note {
+	case "removed", "update_left", "update_refused", "update_settled":
+		return inc.Type == "update"
+	}
+	return false
 }

@@ -14,13 +14,24 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/wh3r3ar3you/uptimeforge/internal/agent"
 	"github.com/wh3r3ar3you/uptimeforge/internal/app"
+	"github.com/wh3r3ar3you/uptimeforge/internal/checks"
+	"github.com/wh3r3ar3you/uptimeforge/internal/geoip"
+	"github.com/wh3r3ar3you/uptimeforge/internal/hub"
 	"github.com/wh3r3ar3you/uptimeforge/internal/model"
+	"github.com/wh3r3ar3you/uptimeforge/internal/proto"
 	"github.com/wh3r3ar3you/uptimeforge/internal/store"
 	"gopkg.in/yaml.v3"
 )
@@ -460,6 +471,26 @@ func TestRedactLink(t *testing.T) {
 	}
 }
 
+// What viewers see redacted in a URL is exactly what keeps a check off an
+// untrusted checker.
+func TestURLCarriesSecretMatchesRedaction(t *testing.T) {
+	for _, in := range []string{
+		"https://sub.example.com/p_q7Xk2LmN9vRt4Z",
+		"https://x.example.com/?token=abc",
+		"https://u:p@host/",
+		"https://example.com/health",
+		"https://api.example.com/health?token=t1&x=1",
+		"https://api.example.com/hook?room=Ab12Cd34Ef56Gh",
+		"https://app.example.com/api/v1/branding/telegram-widget",
+		"https://sub.example.com/sub/0f8e6c1d2b3a4f5e/vless",
+		"wss://ws.example.com/socket?v=2",
+	} {
+		if got, want := checks.URLCarriesSecret(in), redactLink(in) != in; got != want {
+			t.Errorf("URLCarriesSecret(%q) = %v, but redactLink changes it: %v", in, got, want)
+		}
+	}
+}
+
 // A hub with nothing open and no history used to send null lists, and the
 // dashboard crashed on incidents.length.
 func TestOverviewEmptyListsAreArrays(t *testing.T) {
@@ -764,5 +795,302 @@ func TestAgentImageFollowsHubVersion(t *testing.T) {
 		if got := agentImageFor(v); got != "intoxxx/uptimeforge-agent:latest" {
 			t.Fatalf("%s: %q", v, got)
 		}
+	}
+}
+
+// agentHello connects to the agent endpoint with token and extra headers and
+// says hello, as an agent does.
+func agentHello(t *testing.T, base, token string, hdr http.Header) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	h := http.Header{"Authorization": {"Bearer " + token}}
+	for k, v := range hdr {
+		h[k] = v
+	}
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(base, "http")+"/api/agent/ws", &websocket.DialOptions{HTTPHeader: h})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.CloseNow() })
+	msg, _ := proto.Encode(proto.TypeHello, proto.Hello{Proto: proto.Version, Version: "test"})
+	if err := conn.Write(ctx, websocket.MessageText, msg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The hub learns an agent's public address the way it learns a browser's: a
+// trusted reverse proxy's X-Forwarded-For counts, anybody else's does not.
+func TestAgentClientIPBehindProxy(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		proxies []netip.Prefix
+		want    string
+	}{
+		{"trusted proxy", nil, "203.0.113.7"},        // loopback is a trusted proxy by default
+		{"untrusted", []netip.Prefix{}, "127.0.0.1"}, // UF_TRUSTED_PROXIES=none
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := app.New(app.Options{DatabaseURL: pgtest.URL(t), DataDir: t.TempDir()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Store.Close()
+			got := make(chan string, 1)
+			a.Hub.OnAgentAddr = func(probe string, ip netip.Addr) { got <- probe + " " + ip.String() }
+			token, err := a.SaveProbe(context.Background(), hub.ProbeConfig{ID: "home", Role: hub.RoleChecker}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := httptest.NewServer(New(a, Options{SetupToken: testSetupToken, TrustedProxies: tc.proxies}).Handler())
+			defer srv.Close()
+			agentHello(t, srv.URL, token, http.Header{"X-Forwarded-For": {"203.0.113.7"}})
+			select {
+			case s := <-got:
+				if s != "home "+tc.want {
+					t.Fatalf("OnAgentAddr got %q, want %q", s, "home "+tc.want)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("OnAgentAddr was not called")
+			}
+		})
+	}
+}
+
+// Where a probe point sits is for everyone; its address only for admins.
+func TestViewerDoesNotSeeAgentIP(t *testing.T) {
+	a, srv, _ := startHub(t)
+	admin := newClient(t, srv.URL)
+	setupAdmin(admin)
+	if code := admin.do("POST", "/api/v1/probes", map[string]any{"id": "home", "role": "checker"}, nil); code != 201 {
+		t.Fatalf("create probe: %d", code)
+	}
+	a.Hub.SetNetwork("home", geoip.Network{IP: netip.MustParseAddr("203.0.113.7"), Country: "ru", ASN: "as8359", Org: "MTS PJSC"})
+	viewer := viewerClient(admin)
+	type probes struct {
+		Probes []struct {
+			ID      string           `json:"id"`
+			Network *hub.NetworkView `json:"network"`
+		} `json:"probes"`
+	}
+	network := func(c *client, path string) (*hub.NetworkView, string) {
+		var raw json.RawMessage
+		c.do("GET", path, nil, &raw)
+		var ps probes
+		json.Unmarshal(raw, &ps)
+		for _, p := range ps.Probes {
+			if p.ID == "home" {
+				return p.Network, string(raw)
+			}
+		}
+		return nil, string(raw)
+	}
+	for _, path := range []string{"/api/v1/overview", "/api/v1/probes", "/api/v1/checks"} {
+		n, raw := network(viewer, path)
+		if n == nil || n.Country != "ru" || n.ISP != "mts" {
+			t.Errorf("viewer %s: network %+v", path, n)
+		}
+		if strings.Contains(raw, "203.0.113.7") {
+			t.Errorf("viewer reads the agent's address from %s", path)
+		}
+	}
+	if n, _ := network(admin, "/api/v1/overview"); n == nil || n.IP != "203.0.113.7" {
+		t.Errorf("admin overview: network %+v", n)
+	}
+}
+
+// A systemd agent starts through the launcher so the hub can update it;
+// routers keep running the agent itself (their state dir is on flash).
+func TestInstallScriptUsesLauncher(t *testing.T) {
+	s, _ := startHubWith(t, Options{})
+	r := httptest.NewRequest("GET", "/install.sh", nil)
+	r.Host = "hub.example.com"
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	script := w.Body.String()
+	for _, want := range []string{"ExecStart=/usr/local/bin/uptimeforge-agent launch", "UF_STATE_DIR", "StateDirectory=uptimeforge-agent"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script lacks %q", want)
+		}
+	}
+	_, noSystemd, ok := strings.Cut(script, "# No systemd")
+	if !ok {
+		t.Fatal("no OpenWrt/Entware branch in the script")
+	}
+	starts := 0
+	for _, line := range strings.Split(noSystemd, "\n") {
+		if strings.Contains(line, "start)") {
+			starts++
+			if strings.Contains(line, "launch") {
+				t.Errorf("a router starts the agent through the launcher: %s", line)
+			}
+		}
+	}
+	if starts == 0 {
+		t.Error("the init script has no start")
+	}
+	if sh, err := exec.LookPath("sh"); err == nil {
+		f := filepath.Join(t.TempDir(), "install.sh")
+		os.WriteFile(f, []byte(script), 0o644)
+		if out, err := exec.Command(sh, "-n", f).CombinedOutput(); err != nil {
+			t.Fatalf("script does not parse: %v\n%s", err, out)
+		}
+	}
+}
+
+// The launcher keeps installed updates under /state: every Docker form the
+// hub hands out keeps it in a named volume, so an update survives a
+// container recreate.
+func TestComposeHasStateVolume(t *testing.T) {
+	check := func(name, compose, mem string) {
+		t.Helper()
+		var f struct {
+			Services map[string]struct {
+				ReadOnly    bool              `yaml:"read_only"`
+				MemLimit    string            `yaml:"mem_limit"`
+				Environment map[string]string `yaml:"environment"`
+				Volumes     []string          `yaml:"volumes"`
+			} `yaml:"services"`
+			Volumes map[string]any `yaml:"volumes"`
+		}
+		if err := yaml.Unmarshal([]byte(compose), &f); err != nil {
+			t.Fatalf("%s: compose is not valid YAML: %v\n%s", name, err, compose)
+		}
+		a := f.Services["uptimeforge-agent"]
+		if a.Environment["UF_STATE_DIR"] != "/state" {
+			t.Errorf("%s: environment %+v", name, a.Environment)
+		}
+		if !slices.Contains(a.Volumes, "uptimeforge-agent-state:/state") {
+			t.Errorf("%s: volumes %v", name, a.Volumes)
+		}
+		if _, ok := f.Volumes["uptimeforge-agent-state"]; !ok {
+			t.Errorf("%s: no top-level volume: %+v", name, f.Volumes)
+		}
+		if !a.ReadOnly || a.MemLimit != mem {
+			t.Errorf("%s: read_only %v, mem_limit %q, want %q", name, a.ReadOnly, a.MemLimit, mem)
+		}
+	}
+	in := (&Server{}).installFor("https://hub.example.com", "tok-en_123")
+	check("install", in.Compose, "512m")
+	if !strings.Contains(in.Docker, "-v uptimeforge-agent-state:/state ") {
+		t.Errorf("docker one-liner keeps no /state: %s", in.Docker)
+	}
+
+	_, rest, _ := strings.Cut(joinScriptText, "<<COMPOSE\n")
+	compose, _, ok := strings.Cut(rest, "\nCOMPOSE\n")
+	if !ok {
+		t.Fatal("no compose heredoc in join.sh")
+	}
+	compose = strings.NewReplacer("$env_extra\n", "", "$IMAGE", "img", "$UF_HUB", "https://hub", "$CODE", "code").Replace(compose + "\n")
+	check("join.sh", compose, "256m")
+}
+
+type fakeRollout struct {
+	mu      sync.Mutex
+	st      hub.RolloutStatus
+	resumed []string
+}
+
+func (f *fakeRollout) Rollout() hub.RolloutStatus {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.st
+}
+
+func (f *fakeRollout) ResumeRollout(by string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resumed = append(f.resumed, by)
+	f.st.Halted = false
+}
+
+func (f *fakeRollout) resumedBy() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.resumed)
+}
+
+// The agent rollout is for admins: a viewer neither reads nor resumes it.
+// An admin's resume is the hub's, under the admin's name.
+func TestRolloutAPI(t *testing.T) {
+	s, _ := startHubWith(t, Options{})
+	fake := &fakeRollout{st: hub.RolloutStatus{Version: "0.2.0", Mode: "all", Stage: 2, Updated: 3,
+		InFlight: []string{"edge"}, Failed: []hub.RolloutFailure{{Probe: "home", Error: "the update to 0.2.0 was rolled back"}},
+		Halted: true, NeedReinstall: []string{"router"}, Unsupported: []string{"laptop"}, Blocked: "no signed agents on this hub"}}
+	s.rollout = fake
+	srv := httptest.NewServer(s.Handler()) // after the fake is in place
+	defer srv.Close()
+	admin := newClient(t, srv.URL)
+	setupAdmin(admin)
+	for _, p := range []map[string]any{{"id": "edge", "name": "Edge FI", "role": "checker"}, {"id": "home", "name": "Home", "role": "checker"},
+		{"id": "laptop", "name": "Laptop", "role": "checker"}} {
+		if code := admin.do("POST", "/api/v1/probes", p, nil); code != 201 {
+			t.Fatalf("create probe %v: %d", p["id"], code)
+		}
+	}
+	viewer := viewerClient(admin)
+	if code := viewer.do("GET", "/api/v1/agents/rollout", nil, nil); code != 403 {
+		t.Errorf("viewer status: %d", code)
+	}
+	if code := viewer.do("POST", "/api/v1/agents/rollout/resume", nil, nil); code != 403 {
+		t.Errorf("viewer resume: %d", code)
+	}
+	if got := fake.resumedBy(); len(got) != 0 {
+		t.Fatalf("a viewer resumed the rollout: %v", got)
+	}
+
+	type status struct {
+		hub.RolloutStatus
+		Names   map[string]string `json:"names"`
+		Release bool              `json:"release"`
+	}
+	var st status
+	if code := admin.do("GET", "/api/v1/agents/rollout", nil, &st); code != 200 {
+		t.Fatalf("admin status: %d", code)
+	}
+	if st.Version != "0.2.0" || st.Stage != 2 || !st.Halted || len(st.Failed) != 1 || st.Failed[0].Error == "" ||
+		!slices.Equal(st.InFlight, []string{"edge"}) || !slices.Equal(st.NeedReinstall, []string{"router"}) || !st.Release {
+		t.Errorf("status %+v", st)
+	}
+	if st.Names["edge"] != "Edge FI" || st.Names["home"] != "Home" || st.Names["laptop"] != "Laptop" {
+		t.Errorf("names %v", st.Names)
+	}
+	if st.Blocked != "no signed agents on this hub" || !slices.Equal(st.Unsupported, []string{"laptop"}) {
+		t.Errorf("blocked %q, unsupported %v", st.Blocked, st.Unsupported)
+	}
+	if code := admin.do("POST", "/api/v1/agents/rollout/resume", nil, &st); code != 200 {
+		t.Fatalf("admin resume: %d", code)
+	}
+	if got := fake.resumedBy(); !slices.Equal(got, []string{"leo"}) {
+		t.Errorf("resumed by %v, want [leo]", got)
+	}
+	if st.Halted {
+		t.Errorf("resume answers the status before the resume: %+v", st)
+	}
+}
+
+// The hub learns from the agents dir what it can hand agents to update
+// from: a signature, and a binary per platform. The answer follows the dir.
+func TestAgentFilesForRollout(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("uptimeforge-agent_linux_amd64")
+	write("checksums.txt")
+	f := newAgentFiles(dir)
+	if f.Signed() || !f.Has("uptimeforge-agent_linux_amd64") || f.Has("uptimeforge-agent_windows_amd64.exe") || f.Has("checksums.txt") {
+		t.Fatal("unsigned dir with one linux agent read wrong")
+	}
+	write("checksums.txt.sig")
+	write("uptimeforge-agent_windows_amd64.exe")
+	f.expire()
+	if !f.Signed() || !f.Has("uptimeforge-agent_windows_amd64.exe") {
+		t.Fatal("the dir changed, the answer did not")
+	}
+	if missing := newAgentFiles(filepath.Join(dir, "nope")); missing.Signed() || missing.Has("uptimeforge-agent_linux_amd64") {
+		t.Fatal("a missing dir serves something")
 	}
 }

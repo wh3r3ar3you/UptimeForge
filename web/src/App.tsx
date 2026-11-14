@@ -13,6 +13,7 @@ const ProbeDetail = lazy(() => import('./pages/ProbeDetail'));
 const TelegramProxy = lazy(() => import('./pages/TelegramProxy'));
 const Incidents = lazy(() => import('./pages/Incidents'));
 const Tools = lazy(() => import('./pages/Tools'));
+const Checkers = lazy(() => import('./pages/Checkers'));
 const Remnawave = lazy(() => import('./pages/Remnawave'));
 const Notifications = lazy(() => import('./pages/settings/Notifications'));
 const Templates = lazy(() => import('./pages/settings/Templates'));
@@ -67,6 +68,7 @@ export function App() {
               <Route path="/checks/:id" element={<CheckDetailRoute />} />
               <Route path="/probes" element={<Navigate to="/" replace />} />
               <Route path="/probes/:id" element={<ProbeDetail />} />
+              <Route path="/checkers" element={<Checkers />} />
               <Route path="/telegram-proxy" element={<TelegramProxy />} />
               <Route path="/incidents" element={<Incidents />} />
               <Route path="/tools" element={<Tools />} />

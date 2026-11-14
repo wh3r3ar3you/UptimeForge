@@ -35,6 +35,49 @@ export const THEMES: UfTheme[] = [
 
 export const DEFAULT_THEME = 'forge';
 
+/**
+ * A signal palette colours the live indicators of the systems table: the
+ * users capsule, the state dot, the CPU/memory/disk bars and the load dot.
+ * The three roles stay ok < warn < down whatever the hues; a neon palette
+ * also makes them glow. light holds the shades that read on a light theme.
+ */
+export interface UfSignal {
+  id: string;
+  name: { ru: string; en: string };
+  ok: string;
+  warn: string;
+  down: string;
+  light: { ok: string; warn: string; down: string };
+  glow?: boolean;
+}
+
+export const SIGNALS: UfSignal[] = [
+  { id: 'classic', name: { ru: 'Классика', en: 'Classic' }, ok: '#0ca30c', warn: '#fab219', down: '#d03b3b', light: { ok: '#0ca30c', warn: '#d99400', down: '#d03b3b' } },
+  { id: 'mint', name: { ru: 'Мята', en: 'Mint' }, ok: '#2dd4a7', warn: '#f2c14e', down: '#f2616b', light: { ok: '#0f9f7a', warn: '#c98a00', down: '#d43c48' } },
+  { id: 'ocean', name: { ru: 'Океан', en: 'Ocean' }, ok: '#4c9ffe', warn: '#f5a524', down: '#ef4f5f', light: { ok: '#1f6fd1', warn: '#c77f00', down: '#d63445' } },
+  { id: 'violet', name: { ru: 'Фиалка', en: 'Violet' }, ok: '#a78bfa', warn: '#f6b73c', down: '#f2557a', light: { ok: '#7c5ce0', warn: '#c98a00', down: '#d6335f' } },
+  { id: 'calm', name: { ru: 'Спокойная', en: 'Calm' }, ok: '#8a94a3', warn: '#e6a23c', down: '#e5484d', light: { ok: '#7a828d', warn: '#c47f12', down: '#d43c48' } },
+  { id: 'neon', name: { ru: 'Неон', en: 'Neon' }, ok: '#39ff8f', warn: '#ffe23d', down: '#ff3d71', light: { ok: '#00b86b', warn: '#d19a00', down: '#e0245e' }, glow: true },
+  { id: 'cyber', name: { ru: 'Киберпанк', en: 'Cyberpunk' }, ok: '#22e6ff', warn: '#ffb800', down: '#ff2e88', light: { ok: '#0092b3', warn: '#c98a00', down: '#d61a72' }, glow: true },
+];
+
+export const DEFAULT_SIGNAL = 'classic';
+
+export function findSignal(id?: string): UfSignal {
+  return SIGNALS.find((s) => s.id === id) ?? SIGNALS[0];
+}
+
+/** signalColors are a palette's three roles for a scheme. */
+export function signalColors(s: UfSignal, scheme: 'dark' | 'light') {
+  return scheme === 'light' ? s.light : { ok: s.ok, warn: s.warn, down: s.down };
+}
+
+/** signalVars are the page variables the indicators read. */
+export function signalVars(s: UfSignal, scheme: 'dark' | 'light'): Record<string, string> {
+  const c = signalColors(s, scheme);
+  return { '--uf-ok': c.ok, '--uf-warn': c.warn, '--uf-down': c.down };
+}
+
 export function findTheme(id?: string): UfTheme {
   return THEMES.find((t) => t.id === id) ?? THEMES[0];
 }
@@ -75,7 +118,7 @@ export function mantineTheme(t: UfTheme) {
 }
 
 /** Light themes are not a Mantine scale: their surfaces come in as variables. */
-export function cssVars(t: UfTheme): CSSVariablesResolver {
+export function cssVars(t: UfTheme, s: UfSignal = SIGNALS[0]): CSSVariablesResolver {
   const none: Record<string, string> = {};
   return () => ({
     variables: {
@@ -84,6 +127,7 @@ export function cssVars(t: UfTheme): CSSVariablesResolver {
       // The sidebar sits a step below the page in dark themes, on the card colour in light ones.
       '--uf-nav': t.scheme === 'dark' ? mix(t.body, '#000000', 0.18) : t.surface,
       '--uf-border': t.border,
+      ...signalVars(s, t.scheme),
     },
     light: t.scheme === 'light'
       ? {

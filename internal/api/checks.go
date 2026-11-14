@@ -233,6 +233,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		redactRows(rows)
 		redactIncidents(snap.Incidents)
 		redactIncidents(recent)
+		redactProbeStatus(snap.Probes)
 	}
 	rw := s.app.Remnawave()
 	rw.Nodes, rw.Usage = nil, nil
@@ -257,6 +258,7 @@ func (s *Server) listChecks(w http.ResponseWriter, r *http.Request) {
 	}
 	if isViewer(r) {
 		redactRows(rows)
+		redactProbeStatus(snap.Probes)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"checks": rows, "probes": snap.Probes})
 }
@@ -291,6 +293,7 @@ func (s *Server) getCheck(w http.ResponseWriter, r *http.Request) {
 	if viewer {
 		cfg = redactCheck(cfg)
 		redactRows(rows)
+		redactProbeStatus(snap.Probes)
 	}
 	var row *CheckRow
 	kids := []CheckRow{}

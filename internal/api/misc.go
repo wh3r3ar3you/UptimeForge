@@ -506,6 +506,18 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 		s.checksums(w, r)
 		return
 	}
+	if name == "checksums.txt.sig" && s.agentDir != "" {
+		// The release signature of checksums.txt, served byte for byte.
+		path := filepath.Join(s.agentDir, name)
+		if st, err := os.Stat(path); err != nil || !st.Mode().IsRegular() {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFile(w, r, path)
+		return
+	}
 	if s.agentDir == "" || !agentFile.MatchString(name) {
 		http.NotFound(w, r)
 		return
@@ -518,4 +530,20 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	http.ServeFile(w, r, path)
+}
+
+//go:embed join-agent.sh
+var joinScriptText string
+
+// joinScript serves the one-command checker installer, templated like
+// installScript: the hub address and the agent image of this hub's version.
+func (s *Server) joinScript(w http.ResponseWriter, r *http.Request) {
+	hub := s.hubURL(r)
+	if hub == "" {
+		http.Error(w, "bad Host header: set UF_PUBLIC_URL", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Write([]byte(strings.NewReplacer("__HUB_URL__", shellQuote(hub),
+		"__IMAGE__", shellQuote(agentImageFor(version.Version))).Replace(joinScriptText)))
 }

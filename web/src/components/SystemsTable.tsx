@@ -11,12 +11,12 @@ import {
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 import {
-  api, enc, queryClient, useMeta, useRemnawave, useRemnawaveUsers, type Incident, type Install, type ProbeRow, type RemnawaveNode,
+  api, enc, isChecker, queryClient, useMeta, useRemnawave, useRemnawaveUsers, type Incident, type Install, type ProbeRow, type RemnawaveNode,
 } from '../api';
 import { bitrate, bytes, compact, days, duration, flag, num } from '../format';
 import { useCommon, useLang, useT } from '../i18n';
 import { usePrefs, type BarStyle, type Prefs } from '../prefs';
-import { status } from '../theme';
+import { sig, status } from '../theme';
 import { clickableRow, notifyError, notifyOk } from './Misc';
 import { ProbeForm, TokenModal } from './ProbeForm';
 import { Dot } from './Status';
@@ -25,6 +25,7 @@ const L = {
   ru: {
     title: 'Все системы', sub: 'Нажмите на систему, чтобы открыть графики. Заголовки перетаскиваются, их края тянутся мышью.',
     filter: 'Фильтр…', view: 'Вид', add: 'Добавить сервер',
+    users_pill: 'Пользователей онлайн в Remnawave: {0}', users_pill_off: 'Нода отключена в Remnawave',
     density: 'Плотность', d_compact: 'Компактно', d_normal: 'Обычно', d_comfortable: 'Просторно',
     status: 'Статус', s_all: 'Все системы', s_online: 'В сети ({0})', s_offline: 'Не в сети ({0})', s_problems: 'С проблемами ({0})',
     sort: 'Сортировать по', columns: 'Видимые столбцы', reset: 'Сбросить вид',
@@ -45,6 +46,7 @@ const L = {
   en: {
     title: 'All systems', sub: 'Click a system for its charts. Drag a header to move it, its edge to resize.',
     filter: 'Filter…', view: 'View', add: 'Add server',
+    users_pill: 'Users online in Remnawave: {0}', users_pill_off: 'The node is down in Remnawave',
     density: 'Density', d_compact: 'Compact', d_normal: 'Normal', d_comfortable: 'Comfortable',
     status: 'Status', s_all: 'All systems', s_online: 'Online ({0})', s_offline: 'Offline ({0})', s_problems: 'With problems ({0})',
     sort: 'Sort by', columns: 'Visible columns', reset: 'Reset view',
@@ -95,7 +97,7 @@ export const BAR_STYLES: BarStyle[] = ['pill', 'line', 'thin', 'segments', 'grad
 /** Bar draws a usage share in one of the styles a user can pick. */
 export function Bar({ v, kind }: { v: number; kind: BarStyle }) {
   const x = Math.max(0, Math.min(100, v));
-  const color = x >= 90 ? status.down : x >= 75 ? status.partial : status.ok;
+  const color = x >= 90 ? sig.down : x >= 75 ? sig.warn : sig.ok;
   const style = { ['--c' as string]: color, ['--v' as string]: `${x}%`, ['--pct' as string]: Math.max(1, x) };
   switch (kind) {
     case 'none':
@@ -104,8 +106,8 @@ export function Bar({ v, kind }: { v: number; kind: BarStyle }) {
       const r = 7, len = 2 * Math.PI * r;
       return (
         <svg width="20" height="20" viewBox="0 0 20 20" style={{ flex: 'none' }} aria-hidden>
-          <circle cx="10" cy="10" r={r} fill="none" stroke={`color-mix(in srgb, ${color} 20%, transparent)`} strokeWidth="3.2" />
-          <circle cx="10" cy="10" r={r} fill="none" stroke={color} strokeWidth="3.2" strokeLinecap="round"
+          <circle cx="10" cy="10" r={r} fill="none" style={{ stroke: `color-mix(in srgb, ${color} 20%, transparent)` }} strokeWidth="3.2" />
+          <circle cx="10" cy="10" r={r} fill="none" style={{ stroke: color }} strokeWidth="3.2" strokeLinecap="round"
             strokeDasharray={`${(len * x) / 100} ${len}`} transform="rotate(-90 10 10)" />
         </svg>
       );
@@ -133,7 +135,7 @@ function Meter({ v, bar }: { v: number; bar: BarStyle }) {
 
 const pct = (v: number | undefined, warn: number, bad: number) => {
   if (v == null) return <Text size="sm" c="dimmed">—</Text>;
-  const c = v >= bad ? status.down : v >= warn ? status.partial : undefined;
+  const c = v >= bad ? sig.down : v >= warn ? sig.warn : undefined;
   return <Text size="sm" ff="monospace" c={c ?? 'dimmed'} fw={c ? 650 : undefined}>{v.toFixed(v < 10 ? 2 : 1)}%</Text>;
 };
 
@@ -153,7 +155,7 @@ export const COLUMNS: Col[] = [
       const cores = p.sysinfo?.cores, r = cores ? m.load1 / cores : 0;
       return (
         <Tooltip label={c.t('load_hint', cores ?? '?')}>
-          <Group gap={8} wrap="nowrap"><Dot color={r >= 1 ? status.down : r >= 0.7 ? status.partial : status.ok} size={8} />
+          <Group gap={8} wrap="nowrap"><Dot color={r >= 1 ? sig.down : r >= 0.7 ? sig.warn : sig.ok} size={8} />
             {mono(`${m.load1.toFixed(2)} ${m.load5.toFixed(2)} ${m.load15.toFixed(2)}`)}</Group>
         </Tooltip>
       );
@@ -174,7 +176,7 @@ export const COLUMNS: Col[] = [
         <Group gap={6} wrap="nowrap">
           {mono(num(n.usersOnline))}
           {d !== 0 && Math.abs(d) >= 5 && (
-            <Text size="xs" ff="monospace" c={d < 0 && was && n.usersOnline < was * 0.5 ? status.down : 'dimmed'}>{d > 0 ? '▲' : '▼'}{Math.abs(d)}</Text>
+            <Text size="xs" ff="monospace" c={d < 0 && was && n.usersOnline < was * 0.5 ? sig.down : 'dimmed'}>{d > 0 ? '▲' : '▼'}{Math.abs(d)}</Text>
           )}
         </Group>
       );
@@ -189,7 +191,7 @@ export const COLUMNS: Col[] = [
       const same = !c.hubVersion || p.version === c.hubVersion;
       return (
         <Tooltip label={same ? c.t('agent_ok') : c.t('agent_old', c.hubVersion ?? '')}>
-          <Group gap={6} wrap="nowrap"><IconWifi size={14} color={!p.online ? status.down : same ? status.ok : status.partial} />{mono(p.version)}</Group>
+          <Group gap={6} wrap="nowrap"><IconWifi size={14} style={{ color: !p.online ? sig.down : same ? sig.ok : sig.warn }} />{mono(p.version)}</Group>
         </Tooltip>
       );
     } },
@@ -207,21 +209,17 @@ export const COLUMNS: Col[] = [
 
 export const DEFAULT_COLUMNS = ['cpu', 'steal', 'mem', 'disk', 'load', 'net', 'traffic', 'users', 'uptime', 'agent'];
 const SYSTEM_WIDTH = 270;
+
 const ROW = { compact: 46, normal: 64, comfortable: 76 } as const;
 
-function hostOf(s?: string) {
-  return (s ?? '').toLowerCase().replace(/^\[|\]$/g, '').replace(/:\d+$/, '');
-}
-
-/** useRemnawaveIndex finds the panel node of a server by name, id or address. */
+/**
+ * useRemnawaveIndex finds the panel node of a server, as the hub matched it
+ * (rw_node): linked by hand in its settings, by name, or by address.
+ */
 export function useRemnawaveIndex(nodes?: RemnawaveNode[]) {
   return useMemo(() => {
-    const by = new Map<string, RemnawaveNode>();
-    for (const n of nodes ?? []) {
-      by.set(n.name.toLowerCase(), n);
-      if (n.address) by.set(hostOf(n.address), n);
-    }
-    return (p: ProbeRow) => by.get(p.name.toLowerCase()) ?? by.get(p.id.toLowerCase()) ?? (p.host ? by.get(hostOf(p.host)) : undefined);
+    const ids = new Map((nodes ?? []).map((n) => [n.uuid, n]));
+    return (p: ProbeRow) => (p.rw_node ? ids.get(p.rw_node) : undefined);
   }, [nodes]);
 }
 
@@ -234,7 +232,23 @@ function stateOf(p: ProbeRow, alerts: Incident[]): State {
   return 'ok';
 }
 
-const stateColor: Record<State, string> = { ok: status.ok, warn: status.partial, problem: status.down, offline: status.down, never: status.unknown };
+const stateColor: Record<State, string> = { ok: sig.ok, warn: sig.warn, problem: sig.down, offline: sig.down, never: status.unknown };
+
+/** StateMark is the row's state: the users online of its Remnawave node in a
+ * capsule coloured by the state, as the panel shows it, or a dot for a server
+ * that is not a node. */
+function StateMark({ st, node, t }: { st: State; node?: RemnawaveNode; t: T }) {
+  if (!node) return <Dot color={stateColor[st]} pulse={st === 'ok'} size={11} />;
+  const off = !node.isConnected && !node.isDisabled;
+  const color = node.isDisabled ? status.unknown : off ? sig.down : stateColor[st];
+  return (
+    <Tooltip label={off ? t('users_pill_off') : t('users_pill', num(node.usersOnline))}>
+      <span className="uf-users-pill" style={{ ['--c' as string]: color }}>
+        <IconUsers size={15} stroke={2} />{num(node.usersOnline)}
+      </span>
+    </Tooltip>
+  );
+}
 
 /** ViewMenu is Beszel's "View": density, status filter, sort and visible columns. */
 function ViewMenu({ prefs, setPrefs, counts, t, sort, setSort }: {
@@ -305,7 +319,9 @@ function ViewMenu({ prefs, setPrefs, counts, t, sort, setSort }: {
  * server at a comfortable height, the columns the user picked, widths dragged
  * by hand, all of it saved to the user's profile.
  */
-export function SystemsTable({ probes, hubURL, incidents }: { probes: ProbeRow[]; hubURL: string; incidents: Incident[] }) {
+export function SystemsTable({ probes: all, hubURL, incidents }: { probes: ProbeRow[]; hubURL: string; incidents: Incident[] }) {
+  // Checker agents are other people's machines: they have their own tab.
+  const probes = useMemo(() => all.filter((p) => !isChecker(p)), [all]);
   const t = useT(L);
   const c = useCommon();
   const { lang } = useLang();
@@ -492,7 +508,9 @@ export function SystemsTable({ probes, hubURL, incidents }: { probes: ProbeRow[]
     return [where, ...what].filter(Boolean).join(' · ');
   };
 
-  const total = width({ id: 'system', width: SYSTEM_WIDTH }) + visible.reduce((s, col) => s + width(col), 0) + 44;
+  // A Remnawave capsule in front of the name takes the room of a narrow column.
+  const sysW = SYSTEM_WIDTH + (rwq.data?.configured ? 56 : 0);
+  const total = width({ id: 'system', width: sysW }) + visible.reduce((s, col) => s + width(col), 0) + 44;
   // Untouched widths fit the screen, shared in proportion; dragged ones are kept as set.
   const custom = !!Object.keys(prefs.widths ?? {}).length || !!Object.keys(drag).length;
   const floor = 160 + visible.reduce((s, col) => s + col.min, 0) + 44;
@@ -522,13 +540,13 @@ export function SystemsTable({ probes, hubURL, incidents }: { probes: ProbeRow[]
       <Box className="uf-scroll-x" px="md" pb="md">
         <table className="uf-sys" data-density={density} style={{ width: custom ? `max(100%, ${total}px)` : `max(100%, ${floor}px)`, ['--uf-row' as string]: `${ROW[density]}px` }}>
           <colgroup>
-            <col style={{ width: colW(width({ id: 'system', width: SYSTEM_WIDTH })) }} />
+            <col style={{ width: colW(width({ id: 'system', width: sysW })) }} />
             {visible.map((col) => <col key={col.id} style={{ width: colW(width(col)) }} />)}
             <col style={{ width: colW(44) }} />
           </colgroup>
           <thead>
             <tr>
-              <Th id="system" icon={IconServer2} w={width({ id: 'system', width: SYSTEM_WIDTH })} />
+              <Th id="system" icon={IconServer2} w={width({ id: 'system', width: sysW })} />
               {visible.map((col) => <Th key={col.id} id={col.id} icon={col.icon} w={width(col)} hint={col.hint} />)}
               <th />
             </tr>
@@ -544,7 +562,7 @@ export function SystemsTable({ probes, hubURL, incidents }: { probes: ProbeRow[]
                 <tr key={p.id} data-state={st} {...clickableRow(() => nav(`/probes/${enc(p.id)}`))}>
                   <td>
                     <Group gap={12} wrap="nowrap" style={{ minWidth: 0 }}>
-                      <Dot color={stateColor[st]} pulse={st === 'ok'} size={11} />
+                      <span className="uf-sys-mark" data-rw={rwq.data?.configured || undefined}><StateMark st={st} node={rw(p)} t={t} /></span>
                       <span className="uf-sys-flag" aria-hidden>{flag(p.region) || '📍'}</span>
                       <Tooltip label={[p.host, p.mode === 'agent' ? '' : t(p.mode === 'via' ? 'via' : 'hub')].filter(Boolean).join(' · ') || p.id} openDelay={400}>
                         <Box style={{ minWidth: 0 }}>
@@ -558,7 +576,7 @@ export function SystemsTable({ probes, hubURL, incidents }: { probes: ProbeRow[]
                     </Group>
                   </td>
                   {note ? (
-                    <td colSpan={visible.length}><Text size="sm" c={st === 'offline' ? status.down : 'dimmed'} truncate>{note}</Text></td>
+                    <td colSpan={visible.length}><Text size="sm" c={st === 'offline' ? sig.down : 'dimmed'} truncate>{note}</Text></td>
                   ) : visible.map((col) => <td key={col.id}>{col.cell(p, ctx, m) ?? <Text size="sm" c="dimmed">—</Text>}</td>)}
                   <td onClick={(e) => e.stopPropagation()}>
                     <Menu position="bottom-end" withinPortal>
@@ -585,7 +603,7 @@ export function SystemsTable({ probes, hubURL, incidents }: { probes: ProbeRow[]
       </Box>
 
       {adding && <ProbeForm opened={adding} onClose={() => setAdding(false)} hubURL={hubURL} />}
-      {editing && <ProbeForm opened={!!editing} onClose={() => setEditing(null)} initial={editing.config} hubURL={hubURL} />}
+      {editing && <ProbeForm opened={!!editing} onClose={() => setEditing(null)} initial={editing.config} network={editing.network} hubURL={hubURL} />}
       <TokenModal install={install} hubURL={hubURL} title={t('new_token')} onClose={() => setInstall(null)} />
     </Box>
   );

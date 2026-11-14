@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/wh3r3ar3you/uptimeforge/internal/proto"
 	"github.com/wh3r3ar3you/uptimeforge/internal/runner"
 	"github.com/wh3r3ar3you/uptimeforge/internal/sysmon"
+	"github.com/wh3r3ar3you/uptimeforge/internal/version"
 	"github.com/wh3r3ar3you/uptimeforge/internal/xray"
 )
 
@@ -66,6 +68,23 @@ type Hub struct {
 
 	pmu     sync.Mutex
 	pending map[string]chan checks.Result // run-once requests waiting for agents
+
+	// now and liveTicker are the clock of live metrics (live.go); tests
+	// replace them.
+	now        func() time.Time
+	liveTicker func(time.Duration) (<-chan time.Time, func())
+
+	// version is the hub's own release, which agents are updated to
+	// (rollout.go); tests replace it.
+	version string
+	roll    rollout
+	// agentFiles is what the hub serves agents to update from (SetAgentFiles).
+	agentFiles AgentFiles
+
+	// OnAgentAddr is told the public address of every agent that connects,
+	// outside the hub lock; the app looks up its network and calls
+	// SetNetwork. Set it before the hub serves agents.
+	OnAgentAddr func(probeID string, ip netip.Addr)
 }
 
 type probe struct {
@@ -83,6 +102,16 @@ type probe struct {
 	noNet      bool
 	lastAssign []byte
 	host       map[string]*hostState // threshold timers per metric
+	addr       netip.Addr            // the agent's public address at its last connect
+	network    *NetworkView          // what is known about addr (SetNetwork)
+
+	// Live metrics (live.go).
+	watchers  map[chan proto.Metrics]struct{}
+	stopLive  func()        // ends the renewal loop; nil without watchers
+	liveUntil time.Time     // the host was asked for live points until then
+	storedAt  time.Time     // the last point that went to storage
+	agg       liveAgg       // the points since then
+	liveWake  chan struct{} // wakes the hub's own collector (local probe)
 }
 
 type check struct {
@@ -121,6 +150,12 @@ func New(cfg *Config, log *slog.Logger) (*Hub, error) {
 		downAt:    map[string]time.Time{},
 		mutes:     map[string]time.Time{},
 		pending:   map[string]chan checks.Result{},
+		now:       time.Now,
+		version:   version.Version,
+		liveTicker: func(d time.Duration) (<-chan time.Time, func()) {
+			t := time.NewTicker(d)
+			return t.C, t.Stop
+		},
 	}
 	return h, h.Apply(cfg)
 }
@@ -221,6 +256,10 @@ func (h *Hub) Apply(cfg *Config) error {
 		}
 		tokenChanged := p.cfg != nil && p.cfg.TokenHash != pc.TokenHash
 		p.cfg, p.via = pc, vias[pc.ID]
+		if !liveCapable(pc) {
+			h.closeWatchers(p) // turned checker or via: nothing of ours to watch any more
+		}
+		keepNetworkLabels(p)
 		if pc.Virtual() {
 			if p.conn != nil {
 				p.conn.cancel()
@@ -242,6 +281,7 @@ func (h *Hub) Apply(cfg *Config) error {
 		if p.conn != nil {
 			p.conn.cancel()
 		}
+		h.closeWatchers(p)
 		delete(h.probes, id)
 	}
 	h.rebuild()
@@ -263,7 +303,8 @@ func (h *Hub) startVirtual(p *probe) {
 	if p.cfg.Local {
 		ctx, cancel := context.WithCancel(h.ctx)
 		p.stopLocal = cancel
-		go h.localMetrics(ctx, pid)
+		p.liveWake = make(chan struct{}, 1)
+		go h.localMetrics(ctx, pid, p.liveWake)
 	}
 }
 
@@ -275,13 +316,15 @@ func (h *Hub) stopVirtual(p *probe, now time.Time) {
 	p.runner = nil
 	if p.stopLocal != nil {
 		p.stopLocal()
-		p.stopLocal = nil
+		p.stopLocal, p.liveWake = nil, nil
 	}
 	p.online, p.since, p.lastAssign = false, now, nil
 }
 
-// localMetrics gives the hub's own host a row in the servers view.
-func (h *Hub) localMetrics(ctx context.Context, probeID string) {
+// localMetrics gives the hub's own host a row in the servers view. Like an
+// agent it samples every second while its live window lasts; wake says the
+// window opened or was extended.
+func (h *Hub) localMetrics(ctx context.Context, probeID string, wake <-chan struct{}) {
 	c := sysmon.New(nil)
 	info := c.Info(ctx)
 	h.mu.Lock()
@@ -289,14 +332,22 @@ func (h *Hub) localMetrics(ctx context.Context, probeID string) {
 		p.sysinfo = &info
 	}
 	h.mu.Unlock()
-	t := time.NewTicker(localMetricsInt)
+	every := h.localNext(probeID)
+	t := time.NewTimer(every)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-wake:
+			if next := h.localNext(probeID); next < every { // a renewal of a running window changes nothing
+				every = next
+				t.Reset(every)
+			}
 		case <-t.C:
 			h.IngestMetrics(probeID, c.Collect(ctx))
+			every = h.localNext(probeID)
+			t.Reset(every)
 		}
 	}
 }
@@ -324,6 +375,7 @@ func (h *Hub) Run(ctx context.Context) error {
 			h.mu.Lock()
 			for _, p := range h.probes {
 				h.stopVirtual(p, time.Now())
+				h.closeWatchers(p) // live streams and their renewals end with the hub
 			}
 			for _, w := range h.subWatch {
 				w.cancel()
@@ -370,7 +422,8 @@ func (h *Hub) tick() {
 	h.lastTick = now
 	for _, id := range h.probeOrder {
 		p := h.probes[id]
-		if !p.online && now.Sub(p.since) > h.offlineAfter(p) {
+		// A checker is a volunteer's machine: its owner switching it off is no incident.
+		if !p.online && !p.cfg.Checker() && now.Sub(p.since) > h.offlineAfter(p) {
 			note := "never"
 			if p.hello.Version != "" || h.seen[id] {
 				note = p.since.Format(time.RFC3339)
@@ -383,6 +436,7 @@ func (h *Hub) tick() {
 		}
 	}
 	h.evaluateAll(now)
+	h.rolloutStep(h.now())
 
 	for _, inc := range h.incidents {
 		if !inc.Notified && !h.holdBack(inc, now) {

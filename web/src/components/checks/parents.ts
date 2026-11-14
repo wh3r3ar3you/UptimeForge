@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { useChecks, useProbes, useRemnawave } from '../../api';
+import { isChecker, useChecks, useProbes, useRemnawave } from '../../api';
 
 // Names change rarely: these read the cache and let the pages that show the
 // lists keep them fresh, instead of polling three endpoints of their own.
@@ -30,6 +30,6 @@ export function useParentOptions(self?: string) {
   return useMemo(() => [
     { group: 'checks', items: (checks.data?.checks ?? []).filter((c) => !c.parent && !c.subscription && c.id !== self).map((c) => ({ value: c.id, label: c.name })) },
     { group: 'nodes', items: (rw.data?.nodes ?? []).map((n) => ({ value: `node:${n.name}`, label: `🛰 ${n.name}` })) },
-    { group: 'servers', items: (probes.data?.probes ?? []).filter((p) => p.mode === 'agent').map((p) => ({ value: `probe:${p.id}`, label: `🖥 ${p.name}` })) },
+    { group: 'servers', items: (probes.data?.probes ?? []).filter((p) => p.mode === 'agent' && !isChecker(p)).map((p) => ({ value: `probe:${p.id}`, label: `🖥 ${p.name}` })) },
   ], [checks.data, probes.data, rw.data, self]);
 }

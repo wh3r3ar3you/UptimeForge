@@ -17,7 +17,7 @@ func (s *Server) templatesInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"defaults": defaults, "placeholders": notify.Placeholders, "keys": notify.TemplateKeys,
-		"kinds":   []string{"down", "blocked", "partial", "probe_offline", "probe_no_net", "host", "users_drop", "node_down"},
+		"kinds":   []string{"down", "blocked", "partial", "probe_offline", "probe_no_net", "host", "users_drop", "node_down", "agent_update"},
 		"samples": notify.SampleNames, "custom": s.app.Hub.Config().Templates,
 	})
 }

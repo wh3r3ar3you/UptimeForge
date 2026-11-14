@@ -23,6 +23,9 @@ type ProbeRow struct {
 	Managed bool            `json:"managed"`
 	// Traffic24h is bytes moved over the last day, from stored metrics.
 	Traffic24h *store.Traffic `json:"traffic_24h,omitempty"`
+	// RwNode is the uuid of the Remnawave panel node this server is
+	// (hub.MatchNode): linked by hand, by name or by address.
+	RwNode string `json:"rw_node,omitempty"`
 }
 
 func (s *Server) listProbes(w http.ResponseWriter, r *http.Request) {
@@ -36,17 +39,33 @@ func (s *Server) listProbes(w http.ResponseWriter, r *http.Request) {
 		}
 		items[p.ID] = p
 	}
+	// Matched before the redaction: a viewer gets the node, not the address.
+	rw := matchNodes(snap.Probes, s.app.NodeRefs())
+	if viewer {
+		redactProbeStatus(snap.Probes)
+	}
 	traffic := s.traffic24h(r.Context())
 	rows := make([]ProbeRow, 0, len(snap.Probes))
 	for _, ps := range snap.Probes {
 		it := items[ps.ID]
-		row := ProbeRow{ProbeStatus: ps, Config: it.ProbeConfig, Managed: it.Managed}
+		row := ProbeRow{ProbeStatus: ps, Config: it.ProbeConfig, Managed: it.Managed, RwNode: rw[ps.ID]}
 		if tr, ok := traffic[ps.ID]; ok {
 			row.Traffic24h = &tr
 		}
 		rows = append(rows, row)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"probes": rows, "hub_url": s.hubURL(r)})
+}
+
+// matchNodes is the panel node of every server that is one, by probe id.
+func matchNodes(probes []hub.ProbeStatus, nodes []hub.NodeRef) map[string]string {
+	out := map[string]string{}
+	for _, ps := range probes {
+		if n, ok := hub.MatchNode(ps.Ref(), nodes); ok {
+			out[ps.ID] = n.ID
+		}
+	}
+	return out
 }
 
 // traffic24h is every probe's last-day traffic, cached for a minute: the
@@ -139,6 +158,8 @@ const ReleasesURL = "https://github.com/wh3r3ar3you/uptimeforge/releases/downloa
 // composeFile runs the agent next to whatever else the server does: on the
 // host's network so the probe sees the world from there (it changes no routes
 // and listens on no ports), without privileges and with bounded resources.
+// The launcher keeps the updates it installs in the /state volume, the one
+// writable place, so they outlive the container.
 func composeFile(hubURL, token string) string {
 	return fmt.Sprintf(`services:
   uptimeforge-agent:
@@ -155,6 +176,11 @@ func composeFile(hubURL, token string) string {
     environment:
       UF_HUB: %s
       UF_TOKEN: %s
+      UF_STATE_DIR: /state
+    volumes:
+      - uptimeforge-agent-state:/state
+volumes:
+  uptimeforge-agent-state:
 `, agentImageFor(version.Version), strconv.Quote(hubURL), strconv.Quote(token))
 }
 
@@ -187,7 +213,7 @@ func (s *Server) installCommands(hubURL, token string) *Install {
 		ComposeCmd: "mkdir -p /opt/uptimeforge-agent && cd /opt/uptimeforge-agent && cat > compose.yml <<'EOF'\n" + compose + "EOF\ndocker compose up -d",
 		Script: fmt.Sprintf("curl -fsSL %s | sudo UF_HUB=%s UF_TOKEN=%s sh",
 			shellWord(hubURL+"/install.sh"), shellWord(hubURL), shellWord(token)),
-		Docker: fmt.Sprintf("docker run -d --name uptimeforge-agent --restart unless-stopped --network host -e UF_HUB=%s -e UF_TOKEN=%s %s",
+		Docker: fmt.Sprintf("docker run -d --name uptimeforge-agent --restart unless-stopped --network host -v uptimeforge-agent-state:/state -e UF_HUB=%s -e UF_TOKEN=%s %s",
 			shellWord(hubURL), shellWord(token), agentImageFor(version.Version)),
 		Binary: fmt.Sprintf("uptimeforge-agent --hub %s --token %s", shellWord(hubURL), shellWord(token)),
 	}

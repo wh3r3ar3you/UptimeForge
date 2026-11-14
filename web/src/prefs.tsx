@@ -4,6 +4,7 @@ import { api } from './api';
 /** Prefs are a user's view settings, kept on the hub so every device shows the same. */
 export interface Prefs {
   theme?: string;
+  signal?: string; // indicator palette id (themes.ts SIGNALS)
   density?: 'compact' | 'normal' | 'comfortable';
   columns?: string[]; // visible server table columns, in order
   widths?: Record<string, number>; // column widths in px

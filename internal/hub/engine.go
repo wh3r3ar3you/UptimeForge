@@ -40,6 +40,7 @@ func (h *Hub) rebuild() {
 	next := map[string]*check{}
 	h.checkOrder = h.checkOrder[:0]
 	for _, c := range effective {
+		c.carriesSecrets = checks.CarriesSecrets(&c.Spec)
 		ch := h.checks[c.ID]
 		if ch == nil {
 			ch = &check{state: map[string]*pcState{}, kind: model.KindUnknown}
@@ -66,6 +67,23 @@ func (h *Hub) rebuild() {
 	h.checks = next
 	h.computeParents()
 	now := time.Now()
+	for _, id := range h.probeOrder {
+		p := h.probes[id]
+		if !p.cfg.Checker() {
+			continue
+		}
+		// A probe that became a checker never alerts on its own health, and
+		// its host is none of our business: close what it had open without
+		// telling anyone (its host incidents would never close otherwise, it
+		// sends no metrics) and drop what is known about its host.
+		for key, inc := range h.incidents {
+			if key == "probe:"+id || key == "probe-net:"+id || strings.HasPrefix(key, "host:"+id+":") {
+				inc.Notified = false
+				h.transition(key, model.KindOK, "", nil, meta{}, now)
+			}
+		}
+		p.host, p.sysinfo, p.metrics, p.metricsAt, p.agg = nil, nil, nil, time.Time{}, liveAgg{}
+	}
 	for key, inc := range h.incidents { // incidents of checks/probes removed from config
 		if !h.orphaned(key) {
 			continue
@@ -127,6 +145,9 @@ func (h *Hub) baselineCheck(id string, s checks.Spec, only []string) CheckConfig
 
 func (h *Hub) assignmentFor(p *probe) proto.Assign {
 	a := proto.Assign{Probe: p.cfg.ID, Via: p.via, Concurrency: p.cfg.Concurrency, Checks: []checks.Spec{}}
+	if p.cfg.Checker() {
+		a.Metrics = new(bool) // a checker's host is not ours to watch
+	}
 	for _, id := range h.checkOrder {
 		ch := h.checks[id]
 		for _, pid := range ch.probes {
@@ -338,6 +359,11 @@ func (h *Hub) updateProbeHealth(p *probe, now time.Time) bool {
 		return false
 	}
 	p.noNet = noNet
+	if p.cfg.Checker() {
+		// Its rows stay out of verdicts (noNet), but a volunteer's home
+		// connection is nothing to alert on.
+		return true
+	}
 	kind := model.KindOK
 	if noNet {
 		kind = model.KindProbeNoNet

@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/wh3r3ar3you/uptimeforge/internal/agent"
 	"github.com/wh3r3ar3you/uptimeforge/internal/checks"
+	"github.com/wh3r3ar3you/uptimeforge/internal/geoip"
 	"github.com/wh3r3ar3you/uptimeforge/internal/model"
 	"github.com/wh3r3ar3you/uptimeforge/internal/proto"
 	"github.com/wh3r3ar3you/uptimeforge/internal/xray"
@@ -1260,6 +1263,36 @@ func TestNodeDownDefersToTheAgent(t *testing.T) {
 	}
 }
 
+// A server linked to its panel node by hand (its name differs) is the
+// node's agent as a namesake is; a server linked to another node is not,
+// whatever its name.
+func TestNodeDownDefersToTheLinkedAgent(t *testing.T) {
+	h, rec := dropHub(t)
+	t0 := time.Now().Add(-3 * time.Hour)
+	h.mu.Lock()
+	h.probes["de"].online = false
+	h.probes["de"].cfg.RemnawaveNode = "de" // the panel's uuid of the node named "provider-de"
+	h.mu.Unlock()
+	nd := func(n NodeUsers) NodeUsers { n.Name = "provider-de"; return n }
+	fleet := func(de NodeUsers) []NodeUsers { return []NodeUsers{de, node("swe", 880), node("pl", 650)} }
+	feedUsers(h, t0, 0, 120, func(int) []NodeUsers { return fleet(nd(node("de", 470))) })
+	feedUsers(h, t0, 120, 140, func(int) []NodeUsers { return fleet(nd(lost("de"))) })
+	if rec.find(model.EventOpen, "rw:de") != nil {
+		t.Fatal("the linked agent's alert already says this server is down")
+	}
+
+	h2, rec2 := dropHub(t)
+	h2.mu.Lock()
+	h2.probes["de"].online = false
+	h2.probes["de"].cfg.RemnawaveNode = "another-node" // the same name, linked elsewhere
+	h2.mu.Unlock()
+	feedUsers(h2, t0, 0, 120, func(int) []NodeUsers { return fleet(node("de", 470)) })
+	feedUsers(h2, t0, 120, 140, func(int) []NodeUsers { return fleet(lost("de")) })
+	if ev := rec2.find(model.EventOpen, "rw:de"); ev == nil || ev.Incident.Kind != model.KindNodeDown {
+		t.Fatalf("a server linked to another node says nothing about this one: %+v", ev)
+	}
+}
+
 // A ban in progress, then the node is lost: the open drop becomes "node
 // down" in place rather than a second alert; most nodes lost at once say so.
 func TestNodeDownTakesOverAndMass(t *testing.T) {
@@ -1713,10 +1746,50 @@ func TestParentsOtherPortIsNoParent(t *testing.T) {
 	}
 }
 
-// A panel node and its agent match by name, ignoring case and a "(…)" note.
-func TestNodeKey(t *testing.T) {
-	if NodeKey("NL-1 (Amsterdam)") != "nl-1" || NodeKey(" de-node ") != "de-node" || NodeKey("a") == NodeKey("b") {
-		t.Fatal(NodeKey("NL-1 (Amsterdam)"))
+// A panel node and its agent match by name or id, ignoring case and a "(…)"
+// note; a server linked to a node by hand matches that node only.
+func TestIsNodeProbe(t *testing.T) {
+	addr := netip.MustParseAddr
+	uk := NodeRef{ID: "u1", Name: "provider-uk", Address: "uk.example.com", IPs: []string{"203.0.113.7"}}
+	for _, c := range []struct {
+		p    ProbeRef
+		n    NodeRef
+		want bool
+	}{
+		{ProbeRef{ID: "nl-1", Name: "NL-1"}, NodeRef{ID: "u1", Name: "nl-1 (Amsterdam)"}, true},
+		{ProbeRef{ID: "x", Name: " de-node "}, NodeRef{ID: "u1", Name: "DE-node"}, true},
+		{ProbeRef{ID: "de-wl", Name: "de-wl"}, NodeRef{ID: "u1", Name: "de-wl(spare)"}, true},
+		{ProbeRef{ID: "a", Name: "a"}, NodeRef{ID: "u1", Name: "b"}, false},
+		{ProbeRef{ID: "a", Name: "a"}, NodeRef{ID: "u1", Name: " (note)"}, false},
+		// linked by hand: that node only, whatever the names
+		{ProbeRef{Link: "u1", ID: "uk-1", Name: "uk-1"}, uk, true},
+		{ProbeRef{Link: "u2", ID: "de", Name: "de"}, NodeRef{ID: "u1", Name: "de"}, false},
+		// the agent's host name is the node's address
+		{ProbeRef{ID: "uk-1", Name: "uk-1", Host: "UK.example.com"}, uk, true},
+		// the agent connects from the node's public address (resolved or the panel's)
+		{ProbeRef{ID: "uk-1", Name: "uk-1", Addr: addr("203.0.113.7")}, uk, true},
+		{ProbeRef{ID: "s", Name: "s", Addr: addr("::ffff:198.51.100.4")}, NodeRef{ID: "u3", Name: "n", Address: "198.51.100.4"}, true},
+		// a private or CGNAT address is the hub's own NAT, not the node
+		{ProbeRef{ID: "s", Name: "s", Addr: addr("192.168.1.1")}, NodeRef{ID: "u3", Name: "n", Address: "192.168.1.1"}, false},
+		{ProbeRef{ID: "s", Name: "s", Addr: addr("100.64.1.1")}, NodeRef{ID: "u3", Name: "n", IPs: []string{"100.64.1.1"}}, false},
+		{ProbeRef{ID: "s", Name: "s", Addr: addr("203.0.113.8")}, uk, false},
+		// a checker agent is a volunteer's machine, never a node: its name and
+		// the host name it reports are not ours to trust
+		{ProbeRef{Checker: true, ID: "provider-uk", Name: "provider-uk"}, uk, false},
+		{ProbeRef{Checker: true, ID: "v", Name: "v", Host: "uk.example.com", Addr: addr("203.0.113.7")}, uk, false},
+	} {
+		if got := IsNodeProbe(c.p, c.n); got != c.want {
+			t.Errorf("IsNodeProbe(%+v, %+v) = %v", c.p, c.n, got)
+		}
+	}
+	// A name beats an address: the server named after one node and behind
+	// another's address is the named one's.
+	nodes := []NodeRef{{ID: "a", Name: "a", Address: "203.0.113.9"}, {ID: "b", Name: "b"}}
+	if n, ok := MatchNode(ProbeRef{ID: "b", Name: "b", Addr: addr("203.0.113.9")}, nodes); !ok || n.ID != "b" {
+		t.Fatalf("MatchNode = %+v, %v", n, ok)
+	}
+	if _, ok := MatchNode(ProbeRef{ID: "z", Name: "z"}, nodes); ok {
+		t.Fatal("no match must say so")
 	}
 }
 
@@ -2624,5 +2697,2505 @@ func TestRestoredBlockedDoesNotEscalateOnPartialSet(t *testing.T) {
 	h2.mu.Unlock()
 	if k != model.KindBlocked {
 		t.Fatalf("kind %s", k)
+	}
+}
+
+func TestCheckerRoleValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		p    ProbeConfig
+		want string
+	}{
+		{"via checker", ProbeConfig{ID: "v", Via: "socks5://127.0.0.1:1080", Role: RoleChecker}, "role is only for agents"},
+		{"local checker", ProbeConfig{ID: "l", Local: true, Role: RoleChecker}, "role is only for agents"},
+		{"trusted server", ProbeConfig{ID: "s", Token: "token-s-0123456789", Trusted: true}, "trusted"},
+		{"unknown role", ProbeConfig{ID: "u", Token: "token-u-0123456789", Role: "boss"}, "role"},
+		{"linked checker", ProbeConfig{ID: "k", Token: "token-k-0123456789", Role: RoleChecker, RemnawaveNode: "u1"}, "remnawave_node"},
+	}
+	for _, tc := range cases {
+		c := &Config{Probes: []ProbeConfig{tc.p}}
+		if err := c.normalize(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: want error with %q, got %v", tc.name, tc.want, err)
+		}
+	}
+	c := &Config{Probes: []ProbeConfig{
+		{ID: "chk", Token: "token-chk-0123456789", Role: RoleChecker, Trusted: true},
+		// A stale label from when it was a checker must not keep it in "role=checker".
+		{ID: "srv", Token: "token-srv-0123456789", Role: RoleServer, Labels: map[string]string{"role": RoleChecker}},
+		{ID: "lnk", Token: "token-lnk-0123456789", RemnawaveNode: "5b0c1c9e-2f8a-4c3e-9d41-7a2b6e0f1d23"},
+	}}
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if p := c.Probes[0]; !p.Checker() || p.Labels["role"] != RoleChecker || !p.RunsChecks() {
+		t.Fatalf("checker: role %q labels %v", p.Role, p.Labels)
+	}
+	if p := c.Probes[1]; p.Checker() || p.Labels["role"] != "" || p.RunsChecks() {
+		t.Fatalf("server: role %q labels %v", p.Role, p.Labels)
+	}
+}
+
+// checkerHub has a checker with isp=mts and a probing server agent; checks is
+// what they are offered.
+func checkerHub(t *testing.T, trusted bool, cs ...CheckConfig) *Hub {
+	t.Helper()
+	cfg := &Config{DataDir: t.TempDir(), Baseline: []checks.Spec{},
+		Probes: []ProbeConfig{
+			{ID: "chk", Token: "token-chk-0123456789", Role: RoleChecker, Trusted: trusted, Labels: map[string]string{"isp": "mts"}},
+			{ID: "srv", Token: "token-srv-0123456789", Probing: true, Labels: map[string]string{"isp": "mts"}},
+		},
+		Checks: cs}
+	h, err := New(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+func assignedIDs(h *Hub, probe string) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var ids []string
+	for _, s := range h.assignmentFor(h.probes[probe]).Checks {
+		ids = append(ids, s.ID)
+	}
+	return ids
+}
+
+func tcpCheck(id string, probes ...string) CheckConfig {
+	return CheckConfig{Spec: checks.Spec{ID: id, Type: "tcp", TCP: &checks.TCPParams{Address: "10.0.0.1:443"}}, Probes: probes}
+}
+
+// A checker is someone else's machine: "everywhere" must not reach it, only a
+// selector that picks it out.
+func TestCheckerGetsOnlyExplicitChecks(t *testing.T) {
+	h := checkerHub(t, false,
+		tcpCheck("all"), tcpCheck("star", "*"),
+		tcpCheck("role", "role=checker"), tcpCheck("isp", "isp=mts"), tcpCheck("id", "id=chk"),
+		tcpCheck("other-isp", "isp=beeline"),
+		CheckConfig{Spec: checks.Spec{ID: "excluded", Type: "tcp", TCP: &checks.TCPParams{Address: "10.0.0.1:443"}}, Probes: []string{"isp=mts"}, Exclude: []string{"role=checker"}},
+	)
+	if got, want := assignedIDs(h, "chk"), []string{"role", "isp", "id"}; !slices.Equal(got, want) {
+		t.Fatalf("checker got %v, want %v", got, want)
+	}
+	if got, want := assignedIDs(h, "srv"), []string{"all", "star", "isp", "excluded"}; !slices.Equal(got, want) {
+		t.Fatalf("server agent got %v, want %v", got, want)
+	}
+}
+
+func TestUntrustedCheckerGetsNoSecrets(t *testing.T) {
+	vpn := CheckConfig{Spec: checks.Spec{ID: "vpn", Type: "xray", Xray: &checks.XrayParams{
+		Link: "vless://b831381d-6324-4d53-ad4f-8cda48b30811@ok.example.com:443?type=tcp#ok"}}, Probes: []string{"isp=mts"}}
+	plain := tcpCheck("plain", "isp=mts")
+	if got, want := assignedIDs(checkerHub(t, false, vpn, plain), "chk"), []string{"plain"}; !slices.Equal(got, want) {
+		t.Fatalf("untrusted checker got %v, want %v", got, want)
+	}
+	if got, want := assignedIDs(checkerHub(t, true, vpn, plain), "chk"), []string{"vpn", "plain"}; !slices.Equal(got, want) {
+		t.Fatalf("trusted checker got %v, want %v", got, want)
+	}
+	if got, want := assignedIDs(checkerHub(t, false, vpn, plain), "srv"), []string{"vpn", "plain"}; !slices.Equal(got, want) {
+		t.Fatalf("server agent got %v, want %v", got, want)
+	}
+}
+
+// A subscription page or a ?token= URL is a credential too: an untrusted
+// checker picked by its operator must not get it, a trusted one may.
+func TestUntrustedCheckerGetsNoSecretURLs(t *testing.T) {
+	httpCheck := func(id, url string) CheckConfig {
+		return CheckConfig{Spec: checks.Spec{ID: id, Type: "http", HTTP: &checks.HTTPParams{URL: url, Method: "GET"}}, Probes: []string{"isp=mts"}}
+	}
+	sub := httpCheck("sub", "https://sub.example.com/p_q7Xk2LmN9vRt4Z")
+	tok := httpCheck("tok", "https://x.example.com/?token=abc")
+	login := httpCheck("login", "https://u:p@host/")
+	plain := httpCheck("plain", "https://example.com/health")
+	browser := CheckConfig{Spec: checks.Spec{ID: "browser", Type: "real-browser",
+		Params: map[string]string{"url": "https://sub.example.com/p_q7Xk2LmN9vRt4Z"}}, Probes: []string{"isp=mts"}}
+	if got, want := assignedIDs(checkerHub(t, false, sub, tok, login, plain, browser), "chk"), []string{"plain"}; !slices.Equal(got, want) {
+		t.Fatalf("untrusted checker got %v, want %v", got, want)
+	}
+	if got, want := assignedIDs(checkerHub(t, true, sub, tok, login, plain, browser), "chk"), []string{"sub", "tok", "login", "plain", "browser"}; !slices.Equal(got, want) {
+		t.Fatalf("trusted checker got %v, want %v", got, want)
+	}
+}
+
+func TestCheckerAssignHasNoMetrics(t *testing.T) {
+	h := checkerHub(t, false)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if m := h.assignmentFor(h.probes["chk"]).Metrics; m == nil || *m {
+		t.Fatalf("checker assign metrics = %v, want false", m)
+	}
+	if m := h.assignmentFor(h.probes["srv"]).Metrics; m != nil {
+		t.Fatalf("server assign metrics = %v, want nil", *m)
+	}
+}
+
+// sysRecorder counts the host snapshots that reach storage.
+type sysRecorder struct {
+	memRecorder
+	mu2 sync.Mutex
+	n   int
+}
+
+func (r *sysRecorder) System(string, proto.Metrics) {
+	r.mu2.Lock()
+	r.n++
+	r.mu2.Unlock()
+}
+
+func (r *sysRecorder) systems() int {
+	r.mu2.Lock()
+	defer r.mu2.Unlock()
+	return r.n
+}
+
+// A checker is a volunteer's machine: it goes away when its owner turns it
+// off, and that is no incident. The same silence of a server agent is.
+func TestCheckerOfflineIsQuiet(t *testing.T) {
+	h := checkerHub(t, false)
+	rec := &recorder{}
+	h.AddNotifier(rec)
+	h.mu.Lock()
+	for _, id := range []string{"chk", "srv"} {
+		p := h.probes[id]
+		p.hello.Version = "test"
+		p.online = false
+		p.since = time.Now().Add(-48 * time.Hour)
+	}
+	h.mu.Unlock()
+	h.tick()
+	if ev := rec.find(model.EventOpen, "probe:chk"); ev != nil {
+		t.Fatalf("a checker going offline was announced: %+v", ev.Incident)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.incidents["probe:chk"] != nil {
+		t.Fatalf("a checker going offline raised an incident: %+v", h.incidents["probe:chk"])
+	}
+	if h.incidents["probe:srv"] == nil {
+		t.Fatal("a server agent going offline must still raise probe_offline")
+	}
+}
+
+// A checker behind a dead home connection is no alert either, and its rows
+// still drop out of the verdicts.
+func TestCheckerWithoutInternetIsQuiet(t *testing.T) {
+	probe := func(role string) ProbeConfig {
+		return ProbeConfig{ID: "p-" + role, Token: "token-" + role + "-0123456789", Role: role, Probing: role != RoleChecker,
+			Baseline: []checks.Spec{{Type: "tcp", TCP: &checks.TCPParams{Address: "10.0.0.2:443"}}}}
+	}
+	cfg := &Config{DataDir: t.TempDir(), Baseline: []checks.Spec{},
+		Probes: []ProbeConfig{probe(RoleChecker), probe(RoleServer)},
+		Checks: []CheckConfig{
+			{Spec: checks.Spec{ID: "node", Type: "tcp", TCP: &checks.TCPParams{Address: "10.0.0.1:443"}}, Probes: []string{"id=p-checker", "id=p-server"}},
+		}}
+	h, err := New(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{}
+	h.AddNotifier(rec)
+	h.mu.Lock()
+	for _, p := range h.probes {
+		p.online = true
+		p.since = time.Now().Add(-time.Hour)
+	}
+	h.rebuild()
+	h.mu.Unlock()
+
+	for range 3 {
+		for _, id := range []string{"p-checker", "p-server"} {
+			h.Ingest(id, []checks.Result{res("_baseline/"+id+"/0", false), res("node", false)})
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.probes["p-server"].noNet || h.incidents["probe-net:p-server"] == nil {
+		t.Fatal("a server agent without internet must still raise probe-net")
+	}
+	if c := h.probes["p-checker"]; !c.noNet {
+		t.Fatal("the checker's lost internet must still keep its rows out of verdicts")
+	}
+	if h.incidents["probe-net:p-checker"] != nil {
+		t.Fatalf("a checker without internet raised an incident: %+v", h.incidents["probe-net:p-checker"])
+	}
+}
+
+func TestCheckerMetricsDropped(t *testing.T) {
+	h := checkerHub(t, false)
+	rec := &sysRecorder{}
+	h.SetRecorder(rec)
+	h.IngestMetrics("chk", cpuAt(99))
+	h.mu.Lock()
+	if h.probes["chk"].metrics != nil || len(h.probes["chk"].host) != 0 {
+		t.Fatal("a checker's host metrics were kept or fed to host alerts")
+	}
+	h.mu.Unlock()
+	if n := rec.systems(); n != 0 {
+		t.Fatalf("recorder got %d points from a checker", n)
+	}
+	h.IngestMetrics("srv", cpuAt(5))
+	if n := rec.systems(); n != 1 {
+		t.Fatalf("a server agent's metrics must be stored, recorder got %d", n)
+	}
+}
+
+// The global internet baseline is offered to every checker whatever its
+// selectors say: it carries no secrets and it is what tells a dead home line
+// from a dead node.
+func TestCheckerGetsGlobalBaseline(t *testing.T) {
+	cfg := &Config{DataDir: t.TempDir(),
+		Baseline: []checks.Spec{{Type: "tcp", TCP: &checks.TCPParams{Address: "10.0.0.2:443"}}},
+		Probes: []ProbeConfig{
+			{ID: "chk", Token: "token-chk-0123456789", Role: RoleChecker, Labels: map[string]string{"isp": "mts"}},
+			{ID: "srv", Token: "token-srv-0123456789", Probing: true, Labels: map[string]string{"isp": "mts"}},
+		},
+		Checks: []CheckConfig{tcpCheck("node", "isp=mts")}}
+	h, err := New(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{}
+	h.AddNotifier(rec)
+	if got, want := assignedIDs(h, "chk"), []string{"_baseline/0", "node"}; !slices.Equal(got, want) {
+		t.Fatalf("checker got %v, want %v", got, want)
+	}
+	if got, want := assignedIDs(h, "srv"), []string{"_baseline/0", "node"}; !slices.Equal(got, want) {
+		t.Fatalf("server agent got %v, want %v", got, want)
+	}
+	h.mu.Lock()
+	for _, p := range h.probes {
+		p.online = true
+		p.since = time.Now().Add(-time.Hour)
+	}
+	h.mu.Unlock()
+	for range 3 {
+		h.Ingest("chk", []checks.Result{res("_baseline/0", false), res("node", false)})
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.probes["chk"].noNet {
+		t.Fatal("a checker without internet must be noNet, so its failures stay out of verdicts")
+	}
+	if h.incidents["probe-net:chk"] != nil || h.incidents["node"] != nil {
+		t.Fatalf("a checker without internet raised alerts: %v", h.incidents)
+	}
+}
+
+// A probe that becomes a checker never alerts on its own health, so what it
+// had open is closed without a word.
+func TestProbeBecomingCheckerClosesItsIncidentsQuietly(t *testing.T) {
+	h, rec := testHub(t)
+	h.mu.Lock()
+	now := time.Now()
+	h.transition("probe:ru-a", model.KindProbeOffline, "", nil, meta{name: "ru-a", typ: "probe", severity: "warning"}, now)
+	h.transition("probe-net:ru-a", model.KindProbeNoNet, "", nil, meta{name: "ru-a", typ: "probe", severity: "warning"}, now)
+	h.mu.Unlock()
+	if rec.find(model.EventOpen, "probe:ru-a") == nil || rec.find(model.EventOpen, "probe-net:ru-a") == nil {
+		t.Fatal("setup: the incidents were not announced")
+	}
+	h.mu.Lock()
+	cfg := h.cfg.Clone()
+	h.mu.Unlock()
+	for i := range cfg.Probes {
+		if cfg.Probes[i].ID == "ru-a" {
+			cfg.Probes[i].Role = RoleChecker
+		}
+	}
+	if err := h.Apply(cfg); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.incidents["probe:ru-a"] != nil || h.incidents["probe-net:ru-a"] != nil {
+		t.Fatal("a checker's own-health incidents must be closed")
+	}
+	if rec.find(model.EventResolve, "probe:ru-a") != nil || rec.find(model.EventResolve, "probe-net:ru-a") != nil {
+		t.Fatal("closing them must not notify")
+	}
+}
+
+// A server turned checker stops sending metrics, so nothing would ever close
+// its host incidents: they are closed without a word with the rest, and the
+// threshold timers go.
+func TestServerBecomingCheckerClosesHostIncidentsQuietly(t *testing.T) {
+	h, rec := testHub(t)
+	h.mu.Lock()
+	now := time.Now()
+	mt := meta{name: "ru-a", typ: "host", severity: "warning"}
+	h.transition("host:ru-a:cpu", model.KindHost, "", nil, mt, now)
+	h.transition("host:ru-a:disk", model.KindHost, "", nil, mt, now)
+	h.transition("host:ru-b:cpu", model.KindHost, "", nil, meta{name: "ru-b", typ: "host", severity: "warning"}, now)
+	h.probes["ru-a"].host = map[string]*hostState{"cpu": {above: now}}
+	h.mu.Unlock()
+	if rec.find(model.EventOpen, "host:ru-a:cpu") == nil || rec.find(model.EventOpen, "host:ru-a:disk") == nil {
+		t.Fatal("setup: the incidents were not announced")
+	}
+	h.mu.Lock()
+	cfg := h.cfg.Clone()
+	h.mu.Unlock()
+	for i := range cfg.Probes {
+		if cfg.Probes[i].ID == "ru-a" {
+			cfg.Probes[i].Role = RoleChecker
+		}
+	}
+	if err := h.Apply(cfg); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.incidents["host:ru-a:cpu"] != nil || h.incidents["host:ru-a:disk"] != nil {
+		t.Fatal("a checker's host incidents must be closed")
+	}
+	if rec.find(model.EventResolve, "host:ru-a:cpu") != nil || rec.find(model.EventResolve, "host:ru-a:disk") != nil {
+		t.Fatal("closing them must not notify")
+	}
+	if h.probes["ru-a"].host != nil {
+		t.Fatal("a checker keeps no host threshold timers")
+	}
+	if h.incidents["host:ru-b:cpu"] == nil {
+		t.Fatal("another server's host incident was closed")
+	}
+}
+
+// A checker is someone else's machine: the hub keeps nothing of its host,
+// whether it was a server before or says something about its host now.
+func TestCheckerKeepsNoHostData(t *testing.T) {
+	h := checkerHub(t, false)
+	si := proto.SysInfo{Cores: 4, OS: "linux"}
+	h.IngestSysInfo("chk", si)
+	h.IngestSysInfo("srv", si)
+	h.IngestMetrics("srv", cpuAt(5))
+	h.mu.Lock()
+	if h.probes["chk"].sysinfo != nil {
+		t.Fatal("a checker's sysinfo was kept")
+	}
+	if h.probes["srv"].sysinfo == nil || h.probes["srv"].metrics == nil {
+		t.Fatal("setup: a server agent's sysinfo and metrics must be kept")
+	}
+	cfg := h.cfg.Clone()
+	h.mu.Unlock()
+	for i := range cfg.Probes {
+		if cfg.Probes[i].ID == "srv" {
+			cfg.Probes[i].Role, cfg.Probes[i].Probing = RoleChecker, false
+		}
+	}
+	if err := h.Apply(cfg); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	if p := h.probes["srv"]; p.sysinfo != nil || p.metrics != nil || !p.metricsAt.IsZero() {
+		h.mu.Unlock()
+		t.Fatal("a server turned checker kept its host data")
+	}
+	// Whatever slips in, the snapshot (and so every viewer) does not show it.
+	h.probes["chk"].sysinfo, h.probes["chk"].metrics = &si, &proto.Metrics{CPU: 1}
+	h.mu.Unlock()
+	for _, ps := range h.Snapshot().Probes {
+		if (ps.ID == "chk" || ps.ID == "srv") && (ps.SysInfo != nil || ps.Metrics != nil || !ps.MetricsAt.IsZero()) {
+			t.Fatalf("snapshot shows host data of checker %s", ps.ID)
+		}
+	}
+}
+
+// Agents connected while the geo databases were missing are looked up again
+// once they arrive: those online with an address and nothing known about it.
+func TestUnknownNetworks(t *testing.T) {
+	h := checkerHub(t, false)
+	if got := h.UnknownNetworks(); len(got) != 0 {
+		t.Fatalf("nobody connected yet: %v", got)
+	}
+	ip := netip.MustParseAddr("203.0.113.7")
+	h.mu.Lock()
+	for _, id := range []string{"chk", "srv"} {
+		p := h.probes[id]
+		p.online, p.addr = true, ip
+		p.network = &NetworkView{IP: ip.String(), At: time.Now()} // what attach leaves before the lookup
+	}
+	h.mu.Unlock()
+	if got := h.UnknownNetworks(); len(got) != 2 || got["chk"] != ip || got["srv"] != ip {
+		t.Fatalf("both are unknown: %v", got)
+	}
+	h.SetNetwork("chk", mtsNet())
+	h.SetNetwork("srv", geoip.Network{IP: ip}) // the lookup failed: still unknown
+	if got := h.UnknownNetworks(); len(got) != 1 || got["srv"] != ip {
+		t.Fatalf("only srv is unknown: %v", got)
+	}
+	h.mu.Lock()
+	h.probes["srv"].online = false
+	h.mu.Unlock()
+	if got := h.UnknownNetworks(); len(got) != 0 {
+		t.Fatalf("an offline agent is looked up when it connects: %v", got)
+	}
+}
+
+func mtsNet() geoip.Network {
+	return geoip.Network{IP: netip.MustParseAddr("203.0.113.7"), Country: "ru", ASN: "as8359", Org: "MTS PJSC"}
+}
+
+// A checker is labelled by the network it connects from, so a check can pick
+// "the MTS subscribers"; a label the admin set by hand stays.
+func TestSetNetworkLabelsChecker(t *testing.T) {
+	cfg := &Config{DataDir: t.TempDir(), Baseline: []checks.Spec{},
+		Probes: []ProbeConfig{
+			{ID: "chk", Token: "token-chk-0123456789", Role: RoleChecker},
+			{ID: "kz", Token: "token-kz-00123456789", Role: RoleChecker, Labels: map[string]string{"country": "kz"}, LabelsLocked: []string{"country"}},
+		},
+		Checks: []CheckConfig{tcpCheck("mts", "isp=mts")}}
+	h, err := New(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := assignedIDs(h, "chk"); len(got) != 0 {
+		t.Fatalf("before its network is known the checker got %v", got)
+	}
+	before := h.Snapshot()
+	h.SetNetwork("chk", mtsNet())
+	h.SetNetwork("kz", mtsNet())
+
+	h.mu.Lock()
+	chk, kz := maps.Clone(h.probes["chk"].cfg.Labels), maps.Clone(h.probes["kz"].cfg.Labels)
+	h.mu.Unlock()
+	if chk["country"] != "ru" || chk["asn"] != "as8359" || chk["isp"] != "mts" {
+		t.Fatalf("checker labels %v", chk)
+	}
+	if kz["country"] != "kz" || kz["isp"] != "mts" {
+		t.Fatalf("a locked label was overwritten: %v", kz)
+	}
+	if got := assignedIDs(h, "chk"); !slices.Equal(got, []string{"mts"}) {
+		t.Fatalf("checker on MTS got %v, want [mts]", got)
+	}
+	// What was handed out before is a copy: the API marshals it unlocked.
+	for _, p := range before.Probes {
+		if p.Labels["isp"] != "" {
+			t.Fatalf("an earlier snapshot changed under its reader: %v", p.Labels)
+		}
+	}
+	snap := h.Snapshot()
+	for _, p := range snap.Probes {
+		if n := p.Network; p.ID == "chk" && (n == nil || n.IP != "203.0.113.7" || n.Country != "ru" || n.ASN != "as8359" || n.Org != "MTS PJSC" || n.ISP != "mts") {
+			t.Fatalf("network view %+v", n)
+		}
+	}
+}
+
+// A checker that moves to another operator stops running what was meant for
+// the old one, and what it measured there is no evidence any more: its line
+// leaves the check, and the incident it alone kept open closes as soon as the
+// remaining probes say so, not earlier.
+func TestCheckerNetworkChangeDropsOldState(t *testing.T) {
+	h := checkerHub(t, false, tcpCheck("node", "isp=mts"))
+	rec := &recorder{}
+	h.AddNotifier(rec)
+	h.SetNetwork("chk", mtsNet())
+	h.mu.Lock()
+	for _, p := range h.probes {
+		p.online, p.since = true, time.Now().Add(-time.Hour)
+	}
+	h.mu.Unlock()
+	for range 2 {
+		h.Ingest("chk", []checks.Result{res("node", false)})
+		h.Ingest("srv", []checks.Result{res("node", true)})
+	}
+	h.mu.Lock()
+	h.incidents["node"].Started = time.Now().Add(-time.Hour)
+	h.mu.Unlock()
+	h.tick()
+	if ev := rec.find(model.EventOpen, "node"); ev == nil || len(failingSet(ev.Incident.Lines)) != 1 {
+		t.Fatalf("setup: expected an outage seen by the checker alone, got %+v", ev)
+	}
+
+	// The server agent goes quiet, then the checker moves to Beeline.
+	h.mu.Lock()
+	h.probes["srv"].online = false
+	h.mu.Unlock()
+	h.SetNetwork("chk", geoip.Network{IP: netip.MustParseAddr("198.51.100.4"), Country: "ru", ASN: "as3216", Org: "Beeline"})
+
+	if got := assignedIDs(h, "chk"); slices.Contains(got, "node") {
+		t.Fatalf("the checker still runs the MTS check after moving to Beeline: %v", got)
+	}
+	h.mu.Lock()
+	_, kept := h.checks["node"].state["chk"]
+	h.mu.Unlock()
+	if kept {
+		t.Fatal("the checker's MTS result is still part of the check")
+	}
+	h.tick()
+	if ev := rec.find(model.EventResolve, "node"); ev != nil {
+		t.Fatalf("resolved with nobody left to say the node works: %+v", ev.Incident.Lines)
+	}
+
+	// The server agent is back and the node works for it: a real recovery.
+	h.mu.Lock()
+	h.probes["srv"].online = true
+	h.mu.Unlock()
+	h.Ingest("srv", []checks.Result{res("node", true)})
+	ev := rec.find(model.EventResolve, "node")
+	if ev == nil {
+		t.Fatal("the incident stayed open on the line of a probe that no longer runs the check")
+	}
+	for _, l := range ev.Incident.Lines {
+		if !l.OK {
+			t.Fatalf("resolved with a failing line: %+v", ev.Incident.Lines)
+		}
+	}
+}
+
+// Our own servers keep the labels the admin gave them; their network is only
+// shown.
+func TestServerAgentNetworkNoLabels(t *testing.T) {
+	h := checkerHub(t, false, tcpCheck("node", "isp=mts"))
+	h.SetNetwork("srv", geoip.Network{IP: netip.MustParseAddr("198.51.100.4"), Country: "de", ASN: "as24940", Org: "Hetzner Online GmbH"})
+	h.mu.Lock()
+	labels := maps.Clone(h.probes["srv"].cfg.Labels)
+	h.mu.Unlock()
+	if labels["isp"] != "mts" || labels["country"] != "" || labels["asn"] != "" {
+		t.Fatalf("a server agent was relabelled: %v", labels)
+	}
+	if got := assignedIDs(h, "srv"); !slices.Equal(got, []string{"node"}) {
+		t.Fatalf("server agent got %v", got)
+	}
+	for _, p := range h.Snapshot().Probes {
+		if n := p.Network; p.ID == "srv" && (n == nil || n.IP != "198.51.100.4" || n.Country != "de" || n.ASN != "as24940" || n.ISP != "hetzner-online") {
+			t.Fatalf("server agent network view %+v", n)
+		}
+	}
+}
+
+// The app may apply a config composed from a probe object saved before the
+// network was known: the checker keeps its labels. A lookup for an address
+// the agent has since left is ignored.
+func TestNetworkLabelsKeptAcrossApply(t *testing.T) {
+	h := checkerHub(t, false, tcpCheck("node", "isp=mts"))
+	h.SetNetwork("chk", geoip.Network{IP: netip.MustParseAddr("198.51.100.4"), Country: "ru", ASN: "as3216", Org: "Beeline"})
+	h.mu.Lock()
+	cfg := h.cfg.Clone()
+	h.mu.Unlock()
+	cfg.Probes[0].Labels = map[string]string{"isp": "mts"} // the stale object
+	if err := h.Apply(cfg); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	isp := h.probes["chk"].cfg.Labels["isp"]
+	h.probes["chk"].addr = netip.MustParseAddr("192.0.2.1") // reconnected from elsewhere
+	h.mu.Unlock()
+	if isp != "beeline" {
+		t.Fatalf("Apply dropped the network label: isp=%s", isp)
+	}
+	h.SetNetwork("chk", mtsNet()) // the lookup for the old address finishes late
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if isp := h.probes["chk"].cfg.Labels["isp"]; isp != "beeline" {
+		t.Fatalf("a stale lookup relabelled the checker: isp=%s", isp)
+	}
+}
+
+// "Check this config from there" may pick any checker, but a config with a
+// secret is not handed to one nobody vouched for: the answer says why, and
+// the agent sees nothing. A trusted checker, or a check without secrets,
+// still goes out.
+func TestRunOnceRefusesSecretsOnUntrustedChecker(t *testing.T) {
+	vpn := checks.Spec{Type: "xray", Xray: &checks.XrayParams{
+		Link: "vless://b831381d-6324-4d53-ad4f-8cda48b30811@ok.example.com:443?type=tcp#ok"}}
+	plain := checks.Spec{Type: "tcp", TCP: &checks.TCPParams{Address: "10.0.0.1:443"}}
+	connect := func(h *Hub) chan []byte {
+		out := make(chan []byte, 16)
+		h.mu.Lock()
+		h.probes["chk"].conn = &agentConn{assign: make(chan []byte, 1), out: out}
+		h.mu.Unlock()
+		return out
+	}
+
+	h := checkerHub(t, false)
+	out := connect(h)
+	got := h.RunOnce(context.Background(), vpn, []string{"chk"})
+	if len(got) != 1 || got[0].Result == nil || got[0].Result.Status != checks.Down || got[0].Result.Reason != "unavailable" ||
+		got[0].Result.Error != "needs a trusted agent: the check carries secrets" {
+		t.Fatalf("untrusted checker, xray: %+v (result %+v)", got, got[0].Result)
+	}
+	if n := len(out); n != 0 {
+		t.Fatalf("%d messages went to the untrusted checker", n)
+	}
+
+	// The same checker still runs what carries no secret; a trusted one runs
+	// both. A cancelled context returns once the request went out.
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	h.RunOnce(done, plain, []string{"chk"})
+	if n := len(out); n != 1 {
+		t.Fatalf("a plain check sent %d messages to the checker, want 1", n)
+	}
+	h = checkerHub(t, true)
+	out = connect(h)
+	h.RunOnce(done, vpn, []string{"chk"})
+	if n := len(out); n != 1 {
+		t.Fatalf("a trusted checker got %d messages for xray, want 1", n)
+	}
+}
+
+// "Run from everywhere" (no probes picked) means our own infrastructure: a
+// checker takes part only when it is picked by id.
+func TestRunOnceEverywhereSkipsCheckers(t *testing.T) {
+	h := checkerHub(t, true)
+	outs := map[string]chan []byte{}
+	h.mu.Lock()
+	for _, id := range []string{"chk", "srv"} {
+		outs[id] = make(chan []byte, 16)
+		h.probes[id].conn = &agentConn{assign: make(chan []byte, 1), out: outs[id]}
+	}
+	h.mu.Unlock()
+	done, cancel := context.WithCancel(context.Background())
+	cancel() // each run returns once its request went out
+
+	plain := checks.Spec{Type: "tcp", TCP: &checks.TCPParams{Address: "10.0.0.1:443"}}
+	var probes []string
+	for _, o := range h.RunOnce(done, plain, nil) {
+		probes = append(probes, o.Probe)
+	}
+	if !slices.Equal(probes, []string{"srv"}) || len(outs["chk"]) != 0 || len(outs["srv"]) != 1 {
+		t.Fatalf("run everywhere: outcomes from %v, %d messages to the checker, %d to the server", probes, len(outs["chk"]), len(outs["srv"]))
+	}
+	if got := h.RunOnce(done, plain, []string{"chk"}); len(got) != 1 || len(outs["chk"]) != 1 {
+		t.Fatalf("a checker picked by id: %+v, %d messages", got, len(outs["chk"]))
+	}
+}
+
+// liveRig is a hub with a fake agent connection on "srv" and a hand-driven
+// renewal ticker, so a test can play out 10 s renewals without waiting.
+type liveRig struct {
+	h     *Hub
+	conn  *agentConn
+	tick  chan time.Time
+	stops atomic.Int32
+	every atomic.Int64
+}
+
+func newLiveRig(t *testing.T) *liveRig {
+	t.Helper()
+	return newLiveRigWith(t, liveCfg(t, nil))
+}
+
+// liveCfg is checkerHub's config: "chk" a checker, "srv" a server agent;
+// mod changes it.
+func liveCfg(t *testing.T, mod func(*Config)) *Config {
+	cfg := &Config{DataDir: t.TempDir(), Baseline: []checks.Spec{},
+		Probes: []ProbeConfig{
+			{ID: "chk", Token: "token-chk-0123456789", Role: RoleChecker, Labels: map[string]string{"isp": "mts"}},
+			{ID: "srv", Token: "token-srv-0123456789", Probing: true, Labels: map[string]string{"isp": "mts"}},
+		}}
+	if mod != nil {
+		mod(cfg)
+	}
+	return cfg
+}
+
+func newLiveRigWith(t *testing.T, cfg *Config) *liveRig {
+	t.Helper()
+	h, err := New(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &liveRig{h: h, tick: make(chan time.Time),
+		conn: &agentConn{assign: make(chan []byte, 1), out: make(chan []byte, 16), cancel: func() {}}}
+	r.h.liveTicker = func(d time.Duration) (<-chan time.Time, func()) {
+		r.every.Store(int64(d))
+		return r.tick, func() { r.stops.Add(1) }
+	}
+	r.h.mu.Lock()
+	p := r.h.probes["srv"]
+	p.conn, p.online, p.since = r.conn, true, time.Now()
+	r.h.mu.Unlock()
+	return r
+}
+
+// live waits for a message to the agent and returns it as a live command.
+func (r *liveRig) live(t *testing.T) (proto.Live, bool) {
+	t.Helper()
+	select {
+	case msg := <-r.conn.out:
+		var env proto.Envelope
+		var l proto.Live
+		if json.Unmarshal(msg, &env) != nil || env.Type != proto.TypeLive || json.Unmarshal(env.Data, &l) != nil {
+			t.Fatalf("not a live command: %s", msg)
+		}
+		return l, true
+	case <-time.After(2 * time.Second):
+		return proto.Live{}, false
+	}
+}
+
+// quiet reports that nothing more was sent to the agent.
+func (r *liveRig) quiet() bool {
+	select {
+	case <-r.conn.out:
+		return false
+	case <-time.After(150 * time.Millisecond):
+		return true
+	}
+}
+
+// fire plays one renewal tick; false if no renewal loop took it.
+func (r *liveRig) fire(wait time.Duration) bool {
+	select {
+	case r.tick <- time.Now():
+		return true
+	case <-time.After(wait):
+		return false
+	}
+}
+
+// Review Focus 4: two windows on one server, one closes, the other keeps
+// its stream; both close and the agent is no longer asked for live points.
+func TestWatchRenewsLive(t *testing.T) {
+	r := newLiveRig(t)
+	want := proto.Live{IntervalMS: 1000, TTLMS: 15000}
+
+	c1, stop1, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l, ok := r.live(t); !ok || l != want {
+		t.Fatalf("first watcher: agent got %+v (sent %v), want %+v", l, ok, want)
+	}
+	if d := time.Duration(r.every.Load()); d != 10*time.Second {
+		t.Fatalf("renewal every %v, want 10s", d)
+	}
+	c2, stop2, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.fire(2 * time.Second) {
+		t.Fatal("no renewal loop")
+	}
+	if l, ok := r.live(t); !ok || l != want {
+		t.Fatalf("renewal after 10 s: agent got %+v (sent %v)", l, ok)
+	}
+
+	stop1()
+	stop1() // closing twice is harmless
+	if _, open := <-c1; open {
+		t.Fatal("the closed watcher's channel still delivers")
+	}
+	if !r.fire(2 * time.Second) {
+		t.Fatal("renewals stopped while a watcher remains")
+	}
+	if l, ok := r.live(t); !ok || l != want {
+		t.Fatalf("renewal with one watcher left: agent got %+v (sent %v)", l, ok)
+	}
+	r.h.IngestMetrics("srv", cpuAt(42))
+	select {
+	case m := <-c2:
+		if m.CPU != 42 {
+			t.Fatalf("the remaining watcher got %+v", m)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the remaining watcher got no point")
+	}
+
+	stop2()
+	if _, open := <-c2; open {
+		t.Fatal("the last watcher's channel still delivers")
+	}
+	r.fire(200 * time.Millisecond) // a tick already in flight must not renew either
+	if !r.quiet() {
+		t.Fatal("the agent is still asked for live points with nobody watching")
+	}
+	if !eventually(2*time.Second, func() bool { return r.stops.Load() == 1 }) {
+		t.Fatalf("renewal ticker stopped %d times, want 1", r.stops.Load())
+	}
+
+	// Watching again starts over at once.
+	_, stop3, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop3()
+	if l, ok := r.live(t); !ok || l != want {
+		t.Fatalf("watching again: agent got %+v (sent %v)", l, ok)
+	}
+}
+
+// A slow viewer loses points; it never holds up the agent's connection.
+func TestWatchSlowViewerDoesNotBlock(t *testing.T) {
+	r := newLiveRig(t)
+	_, stop, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	done := make(chan struct{})
+	go func() {
+		for i := range 500 {
+			r.h.IngestMetrics("srv", cpuAt(float64(i%100)))
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("IngestMetrics blocked on a viewer that reads nothing")
+	}
+}
+
+// An agent that connects while someone already watches is asked for live
+// points right away, not at the next renewal.
+func TestWatchAgentConnectsLater(t *testing.T) {
+	r := newLiveRig(t)
+	r.h.mu.Lock()
+	p := r.h.probes["srv"]
+	p.conn, p.online = nil, false
+	r.h.mu.Unlock()
+	_, stop, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	if !r.h.attach(p, r.conn, proto.Hello{Proto: proto.Version}, HashToken("token-srv-0123456789"), netip.Addr{}) {
+		t.Fatal("attach refused")
+	}
+	if _, ok := r.live(t); !ok {
+		t.Fatal("an agent connecting during a watch was not asked for live points")
+	}
+}
+
+func TestLiveMetricsStoredAtUsualRate(t *testing.T) {
+	r := newLiveRig(t)
+	rec := &sysRecorder{}
+	r.h.SetRecorder(rec)
+	var cmu sync.Mutex
+	clock := time.Now()
+	r.h.now = func() time.Time { cmu.Lock(); defer cmu.Unlock(); return clock }
+	advance := func(d time.Duration) { cmu.Lock(); clock = clock.Add(d); cmu.Unlock() }
+
+	c, stop, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.live(t)
+	for i := range 30 {
+		if i > 0 && i%10 == 0 { // the 10 s renewal
+			if !r.fire(2*time.Second) || func() bool { _, ok := r.live(t); return !ok }() {
+				t.Fatal("no renewal")
+			}
+		}
+		r.h.IngestMetrics("srv", cpuAt(float64(i)))
+		select {
+		case <-c:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("point %d not fanned out", i)
+		}
+		advance(time.Second)
+	}
+	n := rec.systems()
+	if n == 0 || n > 3 {
+		t.Fatalf("30 live points in 30 s stored %d times, want at most 3", n)
+	}
+	if st := r.h.Snapshot(); st.Probes[1].Metrics == nil || st.Probes[1].Metrics.CPU != 29 {
+		t.Fatalf("the snapshot must still show the newest point: %+v", st.Probes[1].Metrics)
+	}
+	stop()
+
+	// Once the live window is over, every point is stored again: the agent
+	// is back to its own interval, whatever that is.
+	advance(30 * time.Second)
+	r.h.IngestMetrics("srv", cpuAt(1))
+	advance(5 * time.Second)
+	r.h.IngestMetrics("srv", cpuAt(2))
+	if got := rec.systems(); got != n+2 {
+		t.Fatalf("after the live window %d of 2 points were stored", got-n)
+	}
+}
+
+func TestWatchRefusesCheckers(t *testing.T) {
+	cfg := &Config{DataDir: t.TempDir(), Baseline: []checks.Spec{},
+		Probes: []ProbeConfig{
+			{ID: "hub", Local: true},
+			{ID: "via", Via: "socks5://127.0.0.1:1080"},
+			{ID: "chk", Token: "token-chk-0123456789", Role: RoleChecker},
+		}}
+	h, err := New(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"chk", "via", "nope"} {
+		if c, stop, err := h.Watch(id); !errors.Is(err, ErrNoLive) || c != nil || stop != nil {
+			t.Fatalf("Watch(%q) = %v, %v; want ErrNoLive", id, c, err)
+		}
+	}
+
+	// The hub's own host needs no agent: watching it switches its collector
+	// to the live rate (a 15 s collector would send nothing in 5 s).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.Run(ctx)
+	c, stop, err := h.Watch("hub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	for i := range 2 {
+		select {
+		case m := <-c:
+			if m.MemTotal == 0 {
+				t.Fatalf("point %d is not the hub host's: %+v", i, m)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no live point %d from the hub's own host", i)
+		}
+	}
+}
+
+// valRecorder keeps the host points it is given.
+type valRecorder struct {
+	memRecorder
+	mu2 sync.Mutex
+	ms  []proto.Metrics
+}
+
+func (r *valRecorder) System(_ string, m proto.Metrics) {
+	r.mu2.Lock()
+	r.ms = append(r.ms, m)
+	r.mu2.Unlock()
+}
+
+func (r *valRecorder) points() []proto.Metrics {
+	r.mu2.Lock()
+	defer r.mu2.Unlock()
+	return slices.Clone(r.ms)
+}
+
+// fakeClock makes the rig's hub read time from a clock the test advances.
+func (r *liveRig) fakeClock() (advance func(time.Duration)) {
+	var mu sync.Mutex
+	clock := time.Now()
+	r.h.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return clock }
+	return func(d time.Duration) { mu.Lock(); clock = clock.Add(d); mu.Unlock() }
+}
+
+// feed sends points spaced by the gaps (the first one at once), renewing
+// the live window as the hub would every 10 s while c watches. c may be nil.
+func (r *liveRig) feed(t *testing.T, advance func(time.Duration), c <-chan proto.Metrics, ms []proto.Metrics, gap func(i int) time.Duration) {
+	t.Helper()
+	var sinceRenew time.Duration
+	for i, m := range ms {
+		if i > 0 {
+			advance(gap(i))
+			sinceRenew += gap(i)
+		}
+		if c != nil && sinceRenew >= 10*time.Second {
+			sinceRenew = 0
+			if !r.fire(2 * time.Second) {
+				t.Fatal("no renewal loop")
+			}
+			if _, ok := r.live(t); !ok {
+				t.Fatal("no renewal sent")
+			}
+		}
+		r.h.IngestMetrics("srv", m)
+		if c != nil {
+			select {
+			case <-c:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("point %d not fanned out", i)
+			}
+		}
+	}
+}
+
+func cpuRule(above float64, d time.Duration) func(*Config) {
+	return func(c *Config) {
+		c.Alerts.Host = []HostRule{{Metric: "cpu", Above: above, For: checks.Duration(d)}}
+	}
+}
+
+// Host alerts must not depend on whether someone has the page open: live
+// points that swing 80/100 average to 90, like the 15 s points they replace.
+func TestLiveHostAlertSeesAggregate(t *testing.T) {
+	const key = "host:srv:cpu"
+	opened := func(r *liveRig) bool {
+		r.h.mu.Lock()
+		defer r.h.mu.Unlock()
+		return r.h.incidents[key] != nil
+	}
+
+	plain := newLiveRigWith(t, liveCfg(t, cpuRule(85, 30*time.Second)))
+	adv := plain.fakeClock()
+	plain.feed(t, adv, nil, slices.Repeat([]proto.Metrics{cpuAt(90)}, 6), func(int) time.Duration { return 15 * time.Second })
+	if !opened(plain) {
+		t.Fatal("reference: 75 s of cpu 90 at 15 s points must alert on cpu > 85 for 30s")
+	}
+
+	live := newLiveRigWith(t, liveCfg(t, cpuRule(85, 30*time.Second)))
+	adv = live.fakeClock()
+	c, stop, err := live.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	live.live(t)
+	ms := make([]proto.Metrics, 76)
+	for i := range ms {
+		ms[i] = cpuAt(80 + 20*float64(i%2))
+	}
+	live.feed(t, adv, c, ms, func(int) time.Duration { return time.Second })
+	if !opened(live) {
+		t.Fatal("the same load seen live (80/100 every second) did not alert")
+	}
+}
+
+// What is stored and evaluated while live is the aggregate since the last
+// stored point: rates averaged, gauges the newest. A 1 s spike is no alert.
+func TestLivePointsNeverReachHostAlertsAlone(t *testing.T) {
+	r := newLiveRigWith(t, liveCfg(t, cpuRule(85, 0)))
+	rec := &valRecorder{}
+	r.h.SetRecorder(rec)
+	adv := r.fakeClock()
+	c, stop, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	r.live(t)
+	ms := make([]proto.Metrics, 16)
+	for i := range ms {
+		cpu := 10.0
+		if i == 15 {
+			cpu = 100
+		}
+		ms[i] = cpuAt(cpu)
+		ms[i].MemUsed = uint64(i)
+		ms[i].Ext = &proto.HostExt{CPUSteal: cpu / 10, Procs: i}
+	}
+	r.feed(t, adv, c, ms, func(int) time.Duration { return time.Second })
+
+	r.h.mu.Lock()
+	inc := r.h.incidents["host:srv:cpu"]
+	r.h.mu.Unlock()
+	if inc != nil {
+		t.Fatalf("a single 1 s spike between stored points opened %+v", inc.Host)
+	}
+	got := rec.points()
+	if len(got) != 2 {
+		t.Fatalf("stored %d points, want 2", len(got))
+	}
+	want := (14*10.0 + 100) / 15
+	if a := got[1]; math.Abs(a.CPU-want) > 1e-9 || a.Ext == nil || math.Abs(a.Ext.CPUSteal-want/10) > 1e-9 || a.MemUsed != 15 || a.Ext.Procs != 15 {
+		t.Fatalf("stored %+v ext %+v; want cpu %.3f steal %.3f, newest gauges 15", a, a.Ext, want, want/10)
+	}
+}
+
+// An agent that ignores live (old version, a lost renewal, back from
+// offline) sends at its usual 15 s with jitter: every point is stored.
+func TestLiveOldAgentKeepsEveryPoint(t *testing.T) {
+	r := newLiveRig(t)
+	rec := &sysRecorder{}
+	r.h.SetRecorder(rec)
+	adv := r.fakeClock()
+	c, stop, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	r.live(t)
+	r.feed(t, adv, c, slices.Repeat([]proto.Metrics{cpuAt(5)}, 10), func(i int) time.Duration {
+		return 15*time.Second + time.Duration(1-2*(i%2))*time.Second // 14 s, 16 s, ...
+	})
+	if n := rec.systems(); n != 10 {
+		t.Fatalf("an agent at 15 s ± 1 s had %d of 10 points stored while watched", n)
+	}
+}
+
+// A watched probe that goes away or can no longer be watched ends its
+// streams and its renewals.
+func TestApplyClosesWatchers(t *testing.T) {
+	for name, mod := range map[string]func(*Config){
+		"removed": func(c *Config) { c.Probes = c.Probes[:1] },
+		"checker": func(c *Config) { c.Probes[1].Role, c.Probes[1].Probing = RoleChecker, false },
+		"via":     func(c *Config) { c.Probes[1].Token, c.Probes[1].Via = "", "socks5://127.0.0.1:1080" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newLiveRig(t)
+			c, stop, err := r.h.Watch("srv")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stop()
+			r.live(t)
+			if err := r.h.Apply(liveCfg(t, mod)); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case _, open := <-c:
+				if open {
+					t.Fatal("the stream still delivers")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("the stream was not closed")
+			}
+			r.fire(200 * time.Millisecond)
+			if !r.quiet() {
+				t.Fatal("renewals continue")
+			}
+			if !eventually(2*time.Second, func() bool { return r.stops.Load() == 1 }) {
+				t.Fatalf("renewal ticker stopped %d times, want 1", r.stops.Load())
+			}
+		})
+	}
+}
+
+// Streams and renewals end with the hub.
+func TestWatchEndsWithHub(t *testing.T) {
+	r := newLiveRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { r.h.Run(ctx); close(done) }()
+	c, stop, err := r.h.Watch("srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	cancel()
+	<-done
+	select {
+	case _, open := <-c:
+		if open {
+			t.Fatal("the stream still delivers")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the stream outlived the hub")
+	}
+	if !eventually(2*time.Second, func() bool { return r.stops.Load() == 1 }) {
+		t.Fatalf("renewal ticker stopped %d times, want 1", r.stops.Load())
+	}
+}
+
+// Watchers counts the open streams of a probe, so callers (and tests) can
+// see that a closed stream was really unsubscribed.
+func TestWatchersCount(t *testing.T) {
+	r := newLiveRig(t)
+	if n := r.h.Watchers("srv"); n != 0 {
+		t.Fatalf("Watchers before any Watch = %d", n)
+	}
+	_, stop1, _ := r.h.Watch("srv")
+	_, stop2, _ := r.h.Watch("srv")
+	if n := r.h.Watchers("srv"); n != 2 {
+		t.Fatalf("Watchers = %d, want 2", n)
+	}
+	stop1()
+	stop1()
+	if n := r.h.Watchers("srv"); n != 1 {
+		t.Fatalf("Watchers after one stop = %d, want 1", n)
+	}
+	stop2()
+	if n := r.h.Watchers("srv"); n != 0 {
+		t.Fatalf("Watchers after both stops = %d, want 0", n)
+	}
+	if n := r.h.Watchers("nope"); n != 0 {
+		t.Fatalf("Watchers of an unknown probe = %d", n)
+	}
+}
+
+// rollRig drives agent updates: agents on fake connections, the hub's clock
+// in the test's hands, ticks called directly.
+type rollRig struct {
+	t     *testing.T
+	h     *Hub
+	rec   *recorder
+	mu    sync.Mutex
+	clock time.Time
+	conns map[string]*agentConn
+}
+
+const rollTarget = "0.2.0"
+
+func rollToken(id string) string { return "token-" + id + "-0123456789" }
+
+// rolloutCfg has agents a01..aNN; mod changes it.
+func rolloutCfg(t *testing.T, n int, mod func(*Config)) *Config {
+	cfg := &Config{DataDir: t.TempDir(), Baseline: []checks.Spec{}}
+	for i := 1; i <= n; i++ {
+		id := fmt.Sprintf("a%02d", i)
+		cfg.Probes = append(cfg.Probes, ProbeConfig{ID: id, Token: rollToken(id)})
+	}
+	if mod != nil {
+		mod(cfg)
+	}
+	return cfg
+}
+
+func newRollRig(t *testing.T, cfg *Config) *rollRig {
+	t.Helper()
+	h, err := New(cfg, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &rollRig{t: t, h: h, rec: &recorder{}, clock: time.Now(), conns: map[string]*agentConn{}}
+	h.version = rollTarget
+	h.SetAgentFiles(&fakeAgentFiles{signed: true})
+	h.now = func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.clock }
+	h.AddNotifier(r.rec)
+	return r
+}
+
+func (r *rollRig) advance(d time.Duration) { r.mu.Lock(); r.clock = r.clock.Add(d); r.mu.Unlock() }
+func (r *rollRig) tick()                   { r.h.tick() }
+
+// start lets the agents' reconnect window after the hub start pass and ticks.
+func (r *rollRig) start() {
+	r.advance(startupGrace)
+	r.tick()
+}
+
+func (r *rollRig) connect(id, ver string, launcher bool) {
+	r.t.Helper()
+	r.connectOn(id, ver, launcher, "linux", "amd64")
+}
+
+// connectOn is connect from an agent of a given platform (GOOS, GOARCH).
+func (r *rollRig) connectOn(id, ver string, launcher bool, goos, goarch string) {
+	r.t.Helper()
+	r.h.mu.Lock()
+	p := r.h.probes[id]
+	r.h.mu.Unlock()
+	if old := r.conns[id]; old != nil {
+		r.h.detach(p, old)
+	}
+	ac := &agentConn{assign: make(chan []byte, 1), out: make(chan []byte, 16), cancel: func() {}}
+	if !r.h.attach(p, ac, proto.Hello{Proto: proto.Version, Version: ver, Launcher: launcher, OS: goos, Arch: goarch}, HashToken(rollToken(id)), netip.Addr{}) {
+		r.t.Fatalf("attach %s refused", id)
+	}
+	r.conns[id] = ac
+}
+
+func (r *rollRig) drop(id string) {
+	r.h.mu.Lock()
+	p := r.h.probes[id]
+	r.h.mu.Unlock()
+	r.h.detach(p, r.conns[id])
+	delete(r.conns, id)
+}
+
+// restart is an agent coming back on the target after installing it.
+func (r *rollRig) restart(ids ...string) {
+	for _, id := range ids {
+		r.drop(id)
+		r.connect(id, rollTarget, true)
+	}
+}
+
+// sent drains every agent's queue and returns, sorted, who was told to update.
+func (r *rollRig) sent() []string {
+	r.t.Helper()
+	var got []string
+	for _, id := range slices.Sorted(maps.Keys(r.conns)) {
+		for {
+			var msg []byte
+			select {
+			case msg = <-r.conns[id].out:
+			default:
+			}
+			if msg == nil {
+				break
+			}
+			var env proto.Envelope
+			var u proto.Update
+			if json.Unmarshal(msg, &env) != nil || env.Type != proto.TypeUpdate || json.Unmarshal(env.Data, &u) != nil {
+				r.t.Fatalf("%s got something other than an update: %s", id, msg)
+			}
+			if u.Version != rollTarget {
+				r.t.Fatalf("%s told to update to %q", id, u.Version)
+			}
+			got = append(got, id)
+		}
+	}
+	return got
+}
+
+func (r *rollRig) expectSent(want ...string) {
+	r.t.Helper()
+	if got := r.sent(); !slices.Equal(got, want) {
+		r.t.Fatalf("updates went to %v, want %v (status %+v)", got, want, r.h.Rollout())
+	}
+}
+
+// fakeAgentFiles is the hub's agents dir: signed or not, and the release
+// files in it (nil: every platform).
+type fakeAgentFiles struct {
+	mu     sync.Mutex
+	signed bool
+	names  map[string]bool
+}
+
+func (f *fakeAgentFiles) Signed() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.signed }
+func (f *fakeAgentFiles) Has(name string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.names == nil || f.names[name]
+}
+
+func ids(from, to int) []string {
+	var out []string
+	for i := from; i <= to; i++ {
+		out = append(out, fmt.Sprintf("a%02d", i))
+	}
+	return out
+}
+
+// One agent first, then 10%, then everyone, each after the previous stage is
+// back on the new version and ran 10 minutes on it.
+func TestRolloutStages(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 21, nil))
+	for _, id := range ids(1, 20) { // a21 is offline for now
+		r.connect(id, "0.1.0", true)
+	}
+	r.expectSent() // agents are still reconnecting after the hub start
+	r.start()
+	r.expectSent("a01")
+	r.tick()
+	r.expectSent()
+	if st := r.h.Rollout(); st.Version != rollTarget || st.Mode != "all" || st.Stage != 1 || !slices.Equal(st.InFlight, []string{"a01"}) ||
+		st.Updated != 0 || st.Pending != 19 || st.Halted {
+		t.Fatalf("stage 1 status %+v", st)
+	}
+
+	r.advance(time.Minute)
+	r.restart("a01")
+	r.tick()
+	r.expectSent()
+	r.advance(10*time.Minute - time.Second)
+	r.tick()
+	r.expectSent() // the soak is not over
+	r.advance(time.Second)
+	r.tick()
+	r.expectSent("a02", "a03") // 10% of 20
+	if st := r.h.Rollout(); st.Stage != 2 || st.Updated != 1 || st.Pending != 17 || !slices.Equal(st.InFlight, []string{"a02", "a03"}) {
+		t.Fatalf("stage 2 status %+v", st)
+	}
+
+	r.advance(time.Minute)
+	r.restart("a02")
+	r.advance(time.Minute)
+	r.tick()
+	r.expectSent() // a03 is not back yet
+	r.restart("a03")
+	r.advance(10*time.Minute - time.Second)
+	r.tick()
+	r.expectSent() // 10 minutes count from the last one back
+	r.advance(time.Second)
+	r.tick()
+	r.expectSent(ids(4, 20)...)
+	if st := r.h.Rollout(); st.Stage != 3 || st.Updated != 3 || st.Pending != 0 || len(st.InFlight) != 17 {
+		t.Fatalf("stage 3 status %+v", st)
+	}
+
+	// From now on an agent that turns up on an old version is updated at once.
+	r.connect("a21", "0.1.0", true)
+	r.expectSent("a21")
+	r.restart(ids(4, 21)...)
+	r.tick()
+	r.expectSent()
+	if st := r.h.Rollout(); st.Updated != 21 || st.Pending != 0 || len(st.InFlight) != 0 || st.Halted || len(st.Failed) != 0 {
+		t.Fatalf("final status %+v", st)
+	}
+	if ev := r.rec.find(model.EventOpen, rolloutKey); ev != nil {
+		t.Fatalf("a rollout that went fine raised %+v", ev.Incident)
+	}
+}
+
+// haltedRig is a rollout of 20 agents halted because a01, updated first, is
+// not back on the new version 10 minutes later.
+func haltedRig(t *testing.T, back func(r *rollRig)) *rollRig {
+	t.Helper()
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.drop("a01")
+	if back != nil {
+		r.advance(3 * time.Minute)
+		back(r)
+		r.advance(7*time.Minute - time.Second)
+	} else {
+		r.advance(10*time.Minute - time.Second)
+	}
+	r.tick()
+	if r.h.Rollout().Halted || r.rec.find(model.EventOpen, rolloutKey) != nil {
+		t.Fatal("halted before 10 minutes")
+	}
+	r.advance(time.Second)
+	r.tick()
+	st := r.h.Rollout()
+	if !st.Halted || !slices.Equal(st.InFlight, []string{"a01"}) {
+		t.Fatalf("not halted: %+v", st)
+	}
+	return r
+}
+
+func TestRolloutHaltsOnMissingAgent(t *testing.T) {
+	r := haltedRig(t, nil)
+	ev := r.rec.find(model.EventOpen, rolloutKey)
+	if ev == nil {
+		t.Fatal("no incident for an agent that did not come back")
+	}
+	inc := ev.Incident
+	if inc.Severity != model.Warning || inc.Kind != model.KindAgentUpdate || !strings.Contains(inc.Name, rollTarget) ||
+		len(inc.Lines) != 1 || inc.Lines[0].Probe != "a01" || inc.Lines[0].OK || inc.Lines[0].Reason != "update_missing" ||
+		inc.Lines[0].Error != "not back on 0.2.0 within 10 m" {
+		t.Fatalf("incident %+v", inc)
+	}
+	r.advance(time.Hour)
+	r.tick()
+	r.expectSent() // halted: nobody else gets it
+
+	r.h.ResumeRollout("leo")
+	st := r.h.Rollout()
+	if st.Halted || len(st.Failed) != 1 || st.Failed[0].Probe != "a01" || st.Failed[0].Error != "not back on 0.2.0 within 10 m of the update" || len(st.InFlight) != 1 {
+		t.Fatalf("after resume %+v", st)
+	}
+	if r.rec.find(model.EventResolve, rolloutKey) == nil {
+		t.Fatal("resume did not close the incident")
+	}
+	// Nothing is proven yet: stage 1 again, with the next agent.
+	r.expectSent("a02")
+	// The straggler turning up later on its old version is not sent the
+	// version again.
+	r.connect("a01", "0.1.0", true)
+	r.restart("a02")
+	r.advance(10 * time.Minute)
+	r.tick()
+	r.expectSent("a03", "a04")
+}
+
+// The launcher rolled the update back: the agent is back, on its old version.
+func TestRolloutHaltsOnRolledBackAgent(t *testing.T) {
+	r := haltedRig(t, func(r *rollRig) { r.connect("a01", "0.1.0", true) })
+	ev := r.rec.find(model.EventOpen, rolloutKey)
+	if ev == nil || len(ev.Incident.Lines) != 1 || ev.Incident.Lines[0].Reason != "update_rolled_back" {
+		t.Fatalf("incident %+v", ev)
+	}
+	r.tick()
+	r.expectSent()
+}
+
+// The straggler arriving late on the new version closes the incident; the
+// rollout stays halted until someone resumes it.
+func TestRolloutStragglerBackClosesIncident(t *testing.T) {
+	r := haltedRig(t, nil)
+	r.advance(5 * time.Minute)
+	r.connect("a01", rollTarget, true)
+	if r.rec.find(model.EventResolve, rolloutKey) == nil {
+		t.Fatal("the straggler is back on the new version, the incident is still open")
+	}
+	r.advance(time.Hour)
+	r.tick()
+	r.expectSent()
+	if st := r.h.Rollout(); !st.Halted || st.Updated != 1 || len(st.InFlight) != 0 {
+		t.Fatalf("status %+v", st)
+	}
+	r.h.ResumeRollout("leo")
+	r.expectSent("a02", "a03") // a01 proved the version: on to 10%
+}
+
+func TestRolloutStragglerDeletedClosesIncident(t *testing.T) {
+	r := haltedRig(t, nil)
+	cfg := rolloutCfg(t, 20, func(c *Config) { c.Probes = c.Probes[1:] })
+	if err := r.h.Apply(cfg); err != nil {
+		t.Fatal(err)
+	}
+	r.tick()
+	if r.rec.find(model.EventResolve, rolloutKey) == nil {
+		t.Fatal("the straggler was deleted, the incident is still open")
+	}
+	if st := r.h.Rollout(); len(st.InFlight) != 0 {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+// A hub restart forgets the rollout, but not a halt: the open incident says
+// which agents did not come back.
+func TestRolloutHaltSurvivesRestart(t *testing.T) {
+	r := haltedRig(t, nil)
+	open := r.h.Snapshot().Incidents
+	r2 := newRollRig(t, rolloutCfg(t, 20, nil))
+	r2.h.Restore(open, nil)
+	r2.connect("a01", "0.1.0", true)
+	for _, id := range ids(2, 20) {
+		r2.connect(id, "0.1.0", true)
+	}
+	r2.start()
+	r2.expectSent()
+	if st := r2.h.Rollout(); !st.Halted || !slices.Equal(st.InFlight, []string{"a01"}) {
+		t.Fatalf("after restart %+v", st)
+	}
+	if r2.rec.find(model.EventResolve, rolloutKey) != nil {
+		t.Fatal("the restart closed the incident while a01 is still not back")
+	}
+	r2.connect("a01", rollTarget, true)
+	if r2.rec.find(model.EventResolve, rolloutKey) == nil {
+		t.Fatal("a01 is back on the new version, the incident is still open")
+	}
+
+	// A hub of another version leaves the old rollout behind.
+	r3 := newRollRig(t, rolloutCfg(t, 2, nil))
+	r3.h.version = "0.3.0"
+	r3.h.Restore(open, nil)
+	r3.start()
+	if r3.h.Rollout().Halted || len(r3.h.Snapshot().Incidents) != 0 {
+		t.Fatalf("a 0.3.0 hub kept the 0.2.0 halt: %+v", r3.h.Rollout())
+	}
+}
+
+func TestRolloutModes(t *testing.T) {
+	mixed := func(mode string) func(*Config) {
+		return func(c *Config) {
+			c.AgentUpdate = mode
+			c.Probes = []ProbeConfig{
+				{ID: "chk1", Token: rollToken("chk1"), Role: RoleChecker},
+				{ID: "chk2", Token: rollToken("chk2"), Role: RoleChecker},
+				{ID: "srv", Token: rollToken("srv")},
+				{ID: "hub", Local: true},
+			}
+		}
+	}
+	connectAll := func(r *rollRig) {
+		for _, id := range []string{"chk1", "chk2", "srv"} {
+			r.connect(id, "0.1.0", true)
+		}
+	}
+
+	t.Run("checkers", func(t *testing.T) {
+		r := newRollRig(t, rolloutCfg(t, 0, mixed(RoleChecker+"s")))
+		connectAll(r)
+		r.start()
+		r.expectSent("chk1")
+		r.restart("chk1")
+		r.advance(10 * time.Minute)
+		r.tick()
+		r.expectSent("chk2")
+		r.restart("chk2")
+		r.advance(time.Hour)
+		r.tick()
+		r.expectSent() // the server agent is not in scope
+		if st := r.h.Rollout(); st.Mode != "checkers" || st.Updated != 2 || st.Pending != 0 || len(st.NeedReinstall) != 0 {
+			t.Fatalf("status %+v", st)
+		}
+	})
+	t.Run("off", func(t *testing.T) {
+		r := newRollRig(t, rolloutCfg(t, 0, mixed("off")))
+		connectAll(r)
+		r.start()
+		r.advance(time.Hour)
+		r.tick()
+		r.expectSent()
+		if st := r.h.Rollout(); st.Mode != "off" || st.Stage != 0 || st.Pending != 0 {
+			t.Fatalf("status %+v", st)
+		}
+	})
+	t.Run("dev hub", func(t *testing.T) {
+		for _, v := range []string{"dev", "", "v0.2.0", "0.2.0-3-gabcdef1+dirty"} {
+			r := newRollRig(t, rolloutCfg(t, 0, mixed("")))
+			r.h.version = v
+			connectAll(r)
+			r.start()
+			r.advance(time.Hour)
+			r.tick()
+			r.expectSent()
+			if st := r.h.Rollout(); st.Mode != "all" || st.Stage != 0 || st.Pending != 0 {
+				t.Fatalf("hub %q: status %+v", v, st)
+			}
+		}
+	})
+	t.Run("default is all", func(t *testing.T) {
+		r := newRollRig(t, rolloutCfg(t, 0, mixed("")))
+		connectAll(r)
+		r.start()
+		r.expectSent("srv") // a server agent before the checkers
+	})
+	t.Run("switched off mid-rollout", func(t *testing.T) {
+		r := haltedRig(t, nil)
+		cfg := rolloutCfg(t, 20, func(c *Config) { c.AgentUpdate = "off" })
+		if err := r.h.Apply(cfg); err != nil {
+			t.Fatal(err)
+		}
+		r.tick()
+		if r.rec.find(model.EventResolve, rolloutKey) == nil {
+			t.Fatal("updates switched off, the halt incident is still open")
+		}
+		r.advance(time.Hour)
+		r.tick()
+		r.expectSent()
+	})
+	t.Run("validation", func(t *testing.T) {
+		for _, mode := range []string{"", "all", "checkers", "off"} {
+			if err := (&Config{AgentUpdate: mode}).Normalize(); err != nil {
+				t.Fatalf("agent_update %q: %v", mode, err)
+			}
+		}
+		if err := (&Config{AgentUpdate: "servers"}).Normalize(); err == nil || !strings.Contains(err.Error(), "agent_update") {
+			t.Fatalf("agent_update servers: %v", err)
+		}
+	})
+}
+
+// Agents that cannot update themselves are listed for a reinstall; dev
+// builds and newer versions are left alone.
+func TestRolloutSkipsOldAgents(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 5, nil))
+	r.connect("a01", "0.1.0", false)
+	r.connect("a02", "0.1.0", true)
+	r.connect("a03", "dev", true)
+	r.connect("a04", "0.3.0", true)
+	r.connect("a05", "0.2.0-rc1", true)
+	r.start()
+	r.expectSent("a02")
+	if st := r.h.Rollout(); !slices.Equal(st.NeedReinstall, []string{"a01"}) || st.Pending != 1 {
+		t.Fatalf("status %+v", st)
+	}
+	r.restart("a02")
+	r.advance(10 * time.Minute)
+	r.tick()
+	r.expectSent("a05") // a pre-release of the target is older than it
+	r.restart("a05")
+	r.advance(time.Hour)
+	r.tick()
+	r.expectSent()
+	if st := r.h.Rollout(); !slices.Equal(st.NeedReinstall, []string{"a01"}) || st.Updated != 2 || st.Pending != 0 {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+// An agent that refuses the update (a signature it cannot verify, a failed
+// download) says so: it is not sent the version again, and the rollout goes
+// on. The refusal travels over the real agent connection.
+func TestRolloutUpdateError(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	srv := httptest.NewServer(r.h.Handler())
+	defer srv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/api/agent/ws",
+		&websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer " + rollToken("a01")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	hello, _ := proto.Encode(proto.TypeHello, proto.Hello{Proto: proto.Version, Version: "0.1.0", Launcher: true})
+	if err := c.Write(ctx, websocket.MessageText, hello); err != nil {
+		t.Fatal(err)
+	}
+	updates := make(chan proto.Update, 8)
+	go func() {
+		for {
+			_, msg, err := c.Read(ctx)
+			if err != nil {
+				return
+			}
+			var env proto.Envelope
+			var u proto.Update
+			if json.Unmarshal(msg, &env) == nil && env.Type == proto.TypeUpdate && json.Unmarshal(env.Data, &u) == nil {
+				updates <- u
+			}
+		}
+	}()
+	if !eventually(5*time.Second, func() bool { return r.h.Snapshot().Probes[0].Online }) {
+		t.Fatal("a01 never connected")
+	}
+	for _, id := range ids(2, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	select {
+	case u := <-updates:
+		if u.Version != rollTarget {
+			t.Fatalf("a01 told to update to %q", u.Version)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a01 got no update")
+	}
+	r.expectSent()
+
+	refusal, _ := proto.Encode(proto.TypeUpdateResult, proto.UpdateResult{Version: rollTarget, Error: "checksums: bad signature " + strings.Repeat("x", 2000)})
+	if err := c.Write(ctx, websocket.MessageText, refusal); err != nil {
+		t.Fatal(err)
+	}
+	if !eventually(5*time.Second, func() bool { return len(r.h.Rollout().Failed) == 1 }) {
+		t.Fatalf("the refusal was not recorded: %+v", r.h.Rollout())
+	}
+	st := r.h.Rollout()
+	if f := st.Failed[0]; f.Probe != "a01" || !strings.HasPrefix(f.Error, "checksums: bad signature") || len([]rune(f.Error)) > maxUpdateErrLen {
+		t.Fatalf("failure %+v", f)
+	}
+	if st.Halted || r.rec.find(model.EventOpen, rolloutKey) != nil {
+		t.Fatalf("a refused update halted the rollout: %+v", st)
+	}
+	// a01 proved nothing: stage 1 again, with the next agent.
+	r.expectSent("a02")
+	r.restart("a02")
+	r.advance(10 * time.Minute)
+	r.tick()
+	r.expectSent("a03", "a04")
+	r.restart("a03", "a04")
+	r.advance(10 * time.Minute)
+	r.tick()
+	r.expectSent(ids(5, 20)...)
+	select {
+	case u := <-updates:
+		t.Fatalf("a01 was sent %q again after refusing it", u.Version)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if st := r.h.Rollout(); len(st.Failed) != 1 || st.Halted {
+		t.Fatalf("final status %+v", st)
+	}
+}
+
+// Once everyone is being updated, a halt still stops what is sent to agents
+// that turn up on an old version.
+func TestRolloutHaltStopsOpenRollout(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 4, nil))
+	for _, id := range ids(1, 3) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02") // 10% of 3, at least one
+	r.restart("a02")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a03")
+	r.drop("a03")
+	r.advance(updateWait)
+	r.tick()
+	if !r.h.Rollout().Halted {
+		t.Fatalf("not halted: %+v", r.h.Rollout())
+	}
+	r.connect("a04", "0.1.0", true)
+	r.tick()
+	r.expectSent()
+	r.h.ResumeRollout("leo")
+	r.expectSent("a04")
+}
+
+// The canary came back on the new version and died 30 s later: the next
+// stage must not go out on its 10 minutes, and its absence halts the rollout
+// 10 minutes after it went missing.
+func TestRolloutCanaryDiesDuringSoak(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(30 * time.Second)
+	r.drop("a01")
+	r.advance(10*time.Minute - time.Second)
+	r.tick()
+	r.expectSent() // the canary is gone: no stage 2
+	if st := r.h.Rollout(); st.Halted || st.Stage != 1 {
+		t.Fatalf("halted before 10 minutes missing: %+v", st)
+	}
+	r.advance(time.Second)
+	r.tick()
+	st := r.h.Rollout()
+	if !st.Halted || !slices.Equal(st.InFlight, []string{"a01"}) {
+		t.Fatalf("not halted 10 minutes after the canary went missing: %+v", st)
+	}
+	if ev := r.rec.find(model.EventOpen, rolloutKey); ev == nil || ev.Incident.Lines[0].Reason != "update_missing" {
+		t.Fatalf("incident %+v", ev)
+	}
+	r.expectSent()
+}
+
+// The canary reported the new version, then came back on its old one: that
+// is a rollback. It halts at once and is never sent the version again.
+func TestRolloutCanaryBackOnOldHalts(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(time.Minute)
+	r.drop("a01")
+	r.connect("a01", "0.1.0", true)
+	r.expectSent() // not the same version again
+	ev := r.rec.find(model.EventOpen, rolloutKey)
+	if ev == nil || len(ev.Incident.Lines) != 1 || ev.Incident.Lines[0].Reason != "update_rolled_back" {
+		t.Fatalf("a rolled-back canary raised %+v", ev)
+	}
+	r.advance(10 * time.Minute)
+	r.tick()
+	r.expectSent()
+	r.h.ResumeRollout("leo")
+	r.expectSent("a02") // stage 1 again, never a01
+	r.advance(time.Hour)
+	r.tick()
+	r.expectSent()
+}
+
+// A member that comes and goes during the soak runs the 10 minutes again
+// from its return.
+func TestRolloutSoakRestartsOnFlap(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(5 * time.Minute)
+	r.drop("a01")
+	r.advance(time.Minute)
+	r.connect("a01", rollTarget, true)
+	r.advance(5 * time.Minute)
+	r.tick()
+	r.expectSent() // 11 minutes since the first return, 5 since the last
+	r.advance(5 * time.Minute)
+	r.tick()
+	r.expectSent("a02", "a03")
+}
+
+// An agent told to update that turns up on a dev build or a newer release
+// was taken over by someone: it leaves the rollout, it did not roll back.
+func TestRolloutAgentLeavesForOtherVersion(t *testing.T) {
+	for _, v := range []string{"dev", "0.3.0"} {
+		r := newRollRig(t, rolloutCfg(t, 20, nil))
+		for _, id := range ids(1, 20) {
+			r.connect(id, "0.1.0", true)
+		}
+		r.start()
+		r.expectSent("a01")
+		r.drop("a01")
+		r.connect("a01", v, true)
+		r.expectSent("a02") // a01 proved nothing: stage 1 again with the next one
+		r.restart("a02")
+		r.advance(time.Hour)
+		r.tick()
+		r.sent()
+		if st := r.h.Rollout(); st.Halted || slices.Contains(st.InFlight, "a01") || r.rec.find(model.EventOpen, rolloutKey) != nil {
+			t.Fatalf("%s: %+v", v, st)
+		}
+	}
+}
+
+// Closing the incident says why: resumed by someone, or updates stopped.
+func TestRolloutIncidentClosedWithReason(t *testing.T) {
+	r := haltedRig(t, nil)
+	r.h.ResumeRollout("leo")
+	ev := r.rec.find(model.EventResolve, rolloutKey)
+	if ev == nil || ev.Incident.ResolvedBy != "leo" || ev.Incident.Note != "resumed" {
+		t.Fatalf("resume closed %+v", ev)
+	}
+
+	r = haltedRig(t, nil)
+	if err := r.h.Apply(rolloutCfg(t, 20, func(c *Config) { c.AgentUpdate = AgentUpdateOff })); err != nil {
+		t.Fatal(err)
+	}
+	r.tick()
+	if ev := r.rec.find(model.EventResolve, rolloutKey); ev == nil || ev.Incident.Note != "update_stopped" {
+		t.Fatalf("off closed %+v", ev)
+	}
+
+	r = haltedRig(t, nil)
+	r.h.mu.Lock()
+	r.h.version = "dev"
+	r.h.mu.Unlock()
+	r.tick()
+	if ev := r.rec.find(model.EventResolve, rolloutKey); ev == nil || ev.Incident.Note != "update_stopped" {
+		t.Fatalf("dev hub closed %+v", ev)
+	}
+
+	r = haltedRig(t, nil)
+	if err := r.h.Apply(rolloutCfg(t, 20, func(c *Config) { c.Probes = c.Probes[1:] })); err != nil {
+		t.Fatal(err)
+	}
+	r.tick()
+	if ev := r.rec.find(model.EventResolve, rolloutKey); ev == nil || ev.Incident.Note != "removed" {
+		t.Fatalf("deleted straggler closed %+v", ev)
+	}
+}
+
+// Once every agent in scope is on the new version the rollout says it is
+// done, whatever stage it got to.
+func TestRolloutDone(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 3, nil))
+	r.connect("a01", "0.1.0", true)
+	r.connect("a02", rollTarget, true)
+	r.connect("a03", "0.1.0", false)
+	r.start()
+	r.expectSent("a01")
+	if r.h.Rollout().Done {
+		t.Fatal("done while a01 is updating")
+	}
+	r.restart("a01")
+	r.tick()
+	if r.h.Rollout().Done {
+		t.Fatal("done before a01 ran on the new version")
+	}
+	r.advance(rolloutSoak)
+	r.tick()
+	if st := r.h.Rollout(); !st.Done || st.Stage != 1 || st.Updated != 2 || !slices.Equal(st.NeedReinstall, []string{"a03"}) {
+		t.Fatalf("status %+v", st)
+	}
+	// Stage 1 proved the version: an old agent turning up later is stage 2.
+	r.connect("a03", "0.1.0", true)
+	r.expectSent("a03")
+	if st := r.h.Rollout(); st.Done || st.Stage != 2 {
+		t.Fatalf("status %+v", st)
+	}
+}
+
+// An agent that ran the new version through its soak is no longer the
+// rollout's business: switching it off later is no update incident.
+func TestRolloutProvenAgentOfflineIsQuiet(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 3, nil))
+	for _, id := range ids(1, 3) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02")
+	r.restart("a02")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a03")
+	r.restart("a03")
+	r.advance(rolloutSoak)
+	r.tick()
+	for _, id := range ids(1, 3) {
+		r.drop(id)
+	}
+	r.advance(time.Hour)
+	r.tick()
+	if st := r.h.Rollout(); st.Halted || r.rec.find(model.EventOpen, rolloutKey) != nil {
+		t.Fatalf("agents switched off after proving the version halted the rollout: %+v", st)
+	}
+}
+
+// An agent is told a version once per hub run: one that proved it and later
+// turns up on its old version is not told again.
+func TestRolloutNeverResends(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02", "a03")
+	r.drop("a01")
+	r.connect("a01", "0.1.0", true)
+	r.restart("a02", "a03")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent(ids(4, 20)...)
+	r.connect("a01", "0.1.0", true)
+	r.tick()
+	r.expectSent()
+}
+
+// Closing the halt by hand silences it until the stragglers are dealt with,
+// not forever: a later halt alerts again.
+func TestRolloutClosedByHandAlertsOnNextHalt(t *testing.T) {
+	r := haltedRig(t, nil)
+	inc := r.rec.find(model.EventOpen, rolloutKey).Incident
+	if err := r.h.Resolve(inc.ID, "leo"); err != nil {
+		t.Fatal(err)
+	}
+	r.tick()
+	if len(r.h.Snapshot().Incidents) != 0 {
+		t.Fatal("the incident closed by hand reopened")
+	}
+	r.h.ResumeRollout("leo")
+	r.expectSent("a02")
+	r.drop("a02")
+	r.advance(updateWait)
+	r.tick()
+	n := 0
+	for _, ev := range r.rec.events {
+		if ev.Type == model.EventOpen && ev.Incident.Key == rolloutKey {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("a new halt after a manual close raised %d alerts in all, want 2", n)
+	}
+}
+
+// An agent that refuses a version it was never told in this hub run (the
+// hub restarted while it was installing) is not told it afterwards.
+func TestRolloutRefusalFromUntoldAgent(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.h.updateResult("a05", proto.UpdateResult{Version: rollTarget, Error: "checksums: bad signature"})
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02", "a03")
+	r.restart("a02", "a03")
+	r.advance(rolloutSoak)
+	r.tick()
+	want := slices.DeleteFunc(ids(4, 20), func(id string) bool { return id == "a05" })
+	r.expectSent(want...)
+}
+
+// A deleted agent leaves the status too.
+func TestRolloutFailedForgetsDeletedAgent(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.h.updateResult("a01", proto.UpdateResult{Version: rollTarget, Error: "no space left"})
+	if len(r.h.Rollout().Failed) != 1 {
+		t.Fatalf("status %+v", r.h.Rollout())
+	}
+	if err := r.h.Apply(rolloutCfg(t, 20, func(c *Config) { c.Probes = c.Probes[1:] })); err != nil {
+		t.Fatal(err)
+	}
+	r.tick()
+	if st := r.h.Rollout(); len(st.Failed) != 0 {
+		t.Fatalf("a deleted agent is still listed: %+v", st.Failed)
+	}
+}
+
+// stage2Halt is a rollout halted because a02 and a03, the 10% stage, are
+// both missing.
+func stage2Halt(t *testing.T) *rollRig {
+	t.Helper()
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02", "a03")
+	r.drop("a02")
+	r.drop("a03")
+	r.advance(updateWait)
+	r.tick()
+	if ev := r.rec.find(model.EventOpen, rolloutKey); ev == nil || len(ev.Incident.Lines) != 2 {
+		t.Fatalf("no halt for a02 and a03: %+v", ev)
+	}
+	return r
+}
+
+// The close says what became of the stragglers; only their return on the
+// new version is a recovery.
+func TestRolloutCloseSaysWhatHappened(t *testing.T) {
+	closed := func(r *rollRig) string {
+		t.Helper()
+		ev := r.rec.find(model.EventResolve, rolloutKey)
+		if ev == nil {
+			t.Fatal("the incident did not close")
+		}
+		return ev.Incident.Note
+	}
+	deleteProbe := func(r *rollRig, id string) {
+		cfg := rolloutCfg(t, 20, func(c *Config) {
+			c.Probes = slices.DeleteFunc(c.Probes, func(p ProbeConfig) bool { return p.ID == id })
+		})
+		if err := r.h.Apply(cfg); err != nil {
+			t.Fatal(err)
+		}
+		r.tick()
+	}
+
+	r := stage2Halt(t)
+	r.connect("a02", rollTarget, true)
+	r.connect("a03", rollTarget, true)
+	if n := closed(r); n != "" {
+		t.Fatalf("both back on the new version: note %q", n)
+	}
+
+	r = stage2Halt(t)
+	r.connect("a02", "dev", true)
+	r.connect("a03", "0.3.0", true)
+	if n := closed(r); n != "update_left" {
+		t.Fatalf("both moved to another version: note %q", n)
+	}
+
+	r = stage2Halt(t)
+	r.h.updateResult("a02", proto.UpdateResult{Version: rollTarget, Error: "x"})
+	r.h.updateResult("a03", proto.UpdateResult{Version: rollTarget, Error: "y"})
+	if n := closed(r); n != "update_refused" {
+		t.Fatalf("both refused: note %q", n)
+	}
+
+	r = stage2Halt(t)
+	deleteProbe(r, "a02")
+	if r.rec.find(model.EventResolve, rolloutKey) != nil {
+		t.Fatal("closed while a03 is still missing")
+	}
+	deleteProbe(r, "a03")
+	if n := closed(r); n != "removed" {
+		t.Fatalf("both deleted: note %q", n)
+	}
+
+	r = stage2Halt(t)
+	deleteProbe(r, "a02")
+	r.connect("a03", "dev", true)
+	if n := closed(r); n != "update_settled" {
+		t.Fatalf("one deleted, one moved on: note %q", n)
+	}
+
+	r = stage2Halt(t)
+	deleteProbe(r, "a02")
+	r.connect("a03", rollTarget, true)
+	if n := closed(r); n != "update_settled" {
+		t.Fatalf("one deleted, one back: note %q", n)
+	}
+}
+
+// A member that keeps coming back on the new version and dying holds its
+// stage; an hour after the update without a clean 10 minutes it halts the
+// rollout.
+func TestRolloutFlappingMemberHalts(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	for elapsed := time.Duration(0); elapsed < rolloutFlapLimit-5*time.Minute; elapsed += 5 * time.Minute {
+		r.restart("a01")
+		r.advance(4 * time.Minute)
+		r.drop("a01")
+		r.advance(time.Minute)
+		r.tick()
+		if st := r.h.Rollout(); st.Halted || st.Stage != 1 {
+			t.Fatalf("after %s: %+v", elapsed, st)
+		}
+	}
+	r.expectSent()
+	r.restart("a01")
+	r.advance(5 * time.Minute)
+	r.tick()
+	st := r.h.Rollout()
+	ev := r.rec.find(model.EventOpen, rolloutKey)
+	if !st.Halted || ev == nil || len(ev.Incident.Lines) != 1 || ev.Incident.Lines[0].Probe != "a01" || ev.Incident.Lines[0].Reason != "update_unstable" ||
+		ev.Incident.Lines[0].Error != "no 10 m in a row on 0.2.0 within 1 h of the update" {
+		t.Fatalf("a flapping canary an hour on: %+v, incident %+v", st, ev)
+	}
+	r.expectSent()
+	// Between two starts it is still the one that keeps restarting.
+	r.drop("a01")
+	r.advance(time.Minute)
+	r.tick()
+	r.restart("a01")
+	if n := countEvents(r.rec, model.EventUpdate, rolloutKey); n != 0 {
+		t.Fatalf("a restart of the flapping canary changed the incident %d times", n)
+	}
+	// Ten clean minutes on the new version and it counts as back.
+	r.advance(rolloutSoak)
+	r.tick()
+	if r.rec.find(model.EventResolve, rolloutKey) == nil {
+		t.Fatal("the canary ran 10 minutes on the new version, the incident is still open")
+	}
+}
+
+// An agent that ran its clean 10 minutes on the new version and later
+// blips (a reboot two hours after the update, while the rollout is held) is
+// back at once: that is no straggler.
+func TestRolloutProvenAgentBlipIsNoStraggler(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02", "a03")
+	r.restart("a03")
+	r.drop("a02") // a02 does not come back: the stage is held, then halted
+	r.advance(rolloutSoak)
+	r.tick()
+	stragglers := func() []string {
+		var out []string
+		for _, inc := range r.h.Snapshot().Incidents {
+			if inc.Key == rolloutKey {
+				for _, l := range inc.Lines {
+					out = append(out, l.Probe)
+				}
+			}
+		}
+		return out
+	}
+	if got := stragglers(); !slices.Equal(got, []string{"a02"}) {
+		t.Fatalf("stragglers %v, want [a02]", got)
+	}
+	r.advance(2 * time.Hour)
+	r.tick()
+	r.drop("a03")
+	r.advance(30 * time.Second)
+	r.connect("a03", rollTarget, true)
+	r.tick()
+	if got := stragglers(); !slices.Equal(got, []string{"a02"}) {
+		t.Fatalf("a proven agent back after a 30 s blip became a straggler: %v", got)
+	}
+	if n := countEvents(r.rec, model.EventUpdate, rolloutKey); n != 0 {
+		t.Fatalf("the blip changed the incident %d times", n)
+	}
+	// It proved the version: gone for good, it is still no straggler.
+	r.drop("a03")
+	r.advance(time.Hour)
+	r.tick()
+	if got := stragglers(); !slices.Equal(got, []string{"a02"}) {
+		t.Fatalf("a proven agent gone an hour: stragglers %v", got)
+	}
+	// Back on an older version, it rolled the update back.
+	r.connect("a03", "0.1.0", true)
+	if got := stragglers(); !slices.Equal(got, []string{"a02", "a03"}) {
+		t.Fatalf("a proven agent back on its old version: stragglers %v", got)
+	}
+}
+
+// A member that proved the version (ran its 10 minutes) and then went away
+// does not hold its stage: the stage goes on once the rest proved it too,
+// and the absence is no straggler.
+func TestRolloutProvenMemberAwayDoesNotBlock(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 20, nil))
+	for _, id := range ids(1, 20) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("a01")
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02", "a03")
+	r.advance(time.Minute)
+	r.restart("a02")
+	r.advance(8 * time.Minute)
+	r.restart("a03")
+	r.advance(2 * time.Minute) // a02 proved the version
+	r.tick()
+	r.drop("a02")
+	r.advance(4 * time.Minute)
+	r.drop("a03") // a03 blips: its 10 minutes start again
+	r.connect("a03", rollTarget, true)
+	r.advance(rolloutSoak - time.Second)
+	r.tick()
+	r.expectSent()
+	if st := r.h.Rollout(); st.Halted || r.rec.find(model.EventOpen, rolloutKey) != nil {
+		t.Fatalf("a02, proven and gone 14 minutes, halted the rollout: %+v", st)
+	}
+	r.advance(time.Second)
+	r.tick()
+	r.expectSent(ids(4, 20)...)
+	r.restart(ids(4, 20)...)
+	r.advance(time.Hour)
+	r.tick()
+	if st := r.h.Rollout(); st.Halted || r.rec.find(model.EventOpen, rolloutKey) != nil {
+		t.Fatalf("halted: %+v", st)
+	}
+}
+
+// checkerCfg has checker agents c01..cNN and nothing else.
+func checkerCfg(t *testing.T, n int) *Config {
+	return rolloutCfg(t, 0, func(c *Config) {
+		for i := 1; i <= n; i++ {
+			id := fmt.Sprintf("c%02d", i)
+			c.Probes = append(c.Probes, ProbeConfig{ID: id, Token: rollToken(id), Role: RoleChecker})
+		}
+	})
+}
+
+// A checker is a volunteer's machine: switched off, it proves nothing about
+// the update. An offline checker never halts the rollout; the stage goes on
+// without it (or with another agent in its place). Only one that comes back
+// on an older release rolled the update back.
+func TestRolloutOfflineCheckerIsNoStraggler(t *testing.T) {
+	r := newRollRig(t, checkerCfg(t, 20))
+	for i := 1; i <= 20; i++ {
+		r.connect(fmt.Sprintf("c%02d", i), "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("c01")
+	r.drop("c01") // the laptop went to sleep before installing anything
+	r.advance(updateWait - time.Second)
+	r.tick()
+	r.expectSent() // it may be restarting into the update
+	r.advance(time.Second)
+	r.tick()
+	r.expectSent("c02") // gone as long as an update takes: the canary is replaced
+	r.restart("c02")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("c03", "c04")
+	// One checker of the stage is switched off on the new version: the stage
+	// completes with the other.
+	r.restart("c03", "c04")
+	r.advance(time.Minute)
+	r.drop("c04")
+	r.advance(rolloutSoak)
+	r.tick()
+	var want []string
+	for i := 5; i <= 20; i++ {
+		want = append(want, fmt.Sprintf("c%02d", i))
+	}
+	r.expectSent(want...)
+	r.restart(want...)
+	r.advance(2 * time.Hour)
+	r.tick()
+	if st := r.h.Rollout(); st.Halted || r.rec.find(model.EventOpen, rolloutKey) != nil {
+		t.Fatalf("offline checkers halted the rollout: %+v", st)
+	}
+	// c04 is back on the new version after two hours away: just updated.
+	r.connect("c04", rollTarget, true)
+	r.advance(rolloutSoak)
+	r.tick()
+	if st := r.h.Rollout(); st.Halted || slices.Contains(st.InFlight, "c04") {
+		t.Fatalf("c04 back on the new version: %+v", st)
+	}
+	// c01 wakes up on its old version: it gets the time an update takes,
+	// then it is a straggler that rolled the update back.
+	r.connect("c01", "0.1.0", true)
+	r.advance(updateWait - time.Second)
+	r.tick()
+	if st := r.h.Rollout(); st.Halted {
+		t.Fatalf("halted before c01 had the time to update: %+v", st)
+	}
+	r.advance(time.Second)
+	r.tick()
+	ev := r.rec.find(model.EventOpen, rolloutKey)
+	if ev == nil || len(ev.Incident.Lines) != 1 || ev.Incident.Lines[0].Probe != "c01" || ev.Incident.Lines[0].Reason != "update_rolled_back" {
+		t.Fatalf("c01 back on its old version: %+v", ev)
+	}
+}
+
+// A checker that ran the new version and comes back on an older one rolled
+// it back, whatever happened in between.
+func TestRolloutCheckerBackOnOlderHalts(t *testing.T) {
+	r := newRollRig(t, checkerCfg(t, 1))
+	r.connect("c01", "0.1.0", true)
+	r.start()
+	r.expectSent("c01")
+	r.restart("c01")
+	r.advance(time.Minute)
+	r.drop("c01")
+	r.advance(3 * time.Hour)
+	r.tick()
+	if r.rec.find(model.EventOpen, rolloutKey) != nil {
+		t.Fatal("an offline checker raised the incident")
+	}
+	r.connect("c01", "0.1.0", true)
+	ev := r.rec.find(model.EventOpen, rolloutKey)
+	if ev == nil || ev.Incident.Lines[0].Probe != "c01" || ev.Incident.Lines[0].Reason != "update_rolled_back" {
+		t.Fatalf("c01 back on its old version after running the new one: %+v", ev)
+	}
+}
+
+// The first two stages go to agents on our own servers; checkers only when
+// no server is left to try.
+func TestRolloutCanariesAreServersFirst(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 0, func(c *Config) {
+		for i := 1; i <= 3; i++ {
+			id := fmt.Sprintf("a%02d", i) // sort before the servers
+			c.Probes = append(c.Probes, ProbeConfig{ID: id, Token: rollToken(id), Role: RoleChecker})
+		}
+		for i := 1; i <= 19; i++ {
+			id := fmt.Sprintf("s%02d", i)
+			c.Probes = append(c.Probes, ProbeConfig{ID: id, Token: rollToken(id)})
+		}
+	}))
+	for _, id := range []string{"a01", "a02", "a03"} {
+		r.connect(id, "0.1.0", true)
+	}
+	for i := 1; i <= 19; i++ {
+		r.connect(fmt.Sprintf("s%02d", i), "0.1.0", true)
+	}
+	r.start()
+	r.expectSent("s01")
+	r.restart("s01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("s02", "s03", "s04") // 10% of 22
+	r.restart("s02", "s03", "s04")
+	r.advance(rolloutSoak)
+	r.tick()
+	want := []string{"a01", "a02", "a03"}
+	for i := 5; i <= 19; i++ {
+		want = append(want, fmt.Sprintf("s%02d", i))
+	}
+	r.expectSent(want...)
+}
+
+// A hub that cannot hand out a signed release starts no rollout and says
+// why; agents of a platform it has no binary for are listed apart, not
+// failed, and never told.
+func TestRolloutNeedsSignedAgents(t *testing.T) {
+	r := newRollRig(t, rolloutCfg(t, 5, nil))
+	files := &fakeAgentFiles{}
+	r.h.SetAgentFiles(files)
+	for _, id := range ids(1, 3) {
+		r.connect(id, "0.1.0", true)
+	}
+	r.connectOn("a04", "0.1.0", true, "windows", "amd64")
+	r.connectOn("a05", "0.1.0", true, "linux", "arm")
+	r.start()
+	r.advance(time.Hour)
+	r.tick()
+	r.expectSent()
+	if st := r.h.Rollout(); st.Blocked != "no signed agents on this hub" || st.Stage != 0 || len(st.Failed) != 0 || st.Done {
+		t.Fatalf("unsigned agents dir: %+v", st)
+	}
+
+	files.mu.Lock()
+	files.signed = true
+	files.names = map[string]bool{"uptimeforge-agent_linux_amd64": true, "uptimeforge-agent_linux_armv7": true}
+	files.mu.Unlock()
+	r.tick()
+	r.expectSent("a01")
+	st := r.h.Rollout()
+	if st.Blocked != "" || !slices.Equal(st.Unsupported, []string{"a04"}) || len(st.Failed) != 0 || st.Pending != 3 {
+		t.Fatalf("signed agents dir: %+v", st)
+	}
+	r.restart("a01")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a02")
+	r.restart("a02")
+	r.advance(rolloutSoak)
+	r.tick()
+	r.expectSent("a03", "a05") // linux/arm runs the armv7 binary
+	r.restart("a03", "a05")
+	r.advance(time.Hour)
+	r.tick()
+	r.expectSent()
+	if st := r.h.Rollout(); !slices.Equal(st.Unsupported, []string{"a04"}) || len(st.Failed) != 0 || st.Updated != 4 || !st.Done {
+		t.Fatalf("final status %+v", st)
+	}
+
+	// Without an agents dir at all the hub serves nothing to update from.
+	r2 := newRollRig(t, rolloutCfg(t, 2, nil))
+	r2.h.SetAgentFiles(nil)
+	r2.connect("a01", "0.1.0", true)
+	r2.start()
+	r2.expectSent()
+	if st := r2.h.Rollout(); st.Blocked == "" {
+		t.Fatalf("no agents dir: %+v", st)
 	}
 }

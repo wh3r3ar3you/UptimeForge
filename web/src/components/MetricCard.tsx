@@ -2,22 +2,22 @@ import { Badge, Box, Card, CloseButton, Group, SegmentedControl, Text, Tooltip, 
 import { IconZoomIn } from '@tabler/icons-react';
 import { useMemo, useState, type ReactNode } from 'react';
 import { useT } from '../i18n';
-import { Chart, RANGES, seriesStats, timeOption, type LineSeries, type Pal } from './Chart';
+import { Chart, LIVE_RANGE, RANGES, seriesStats, timeOption, type LineSeries, type Pal } from './Chart';
 
 const L = {
   ru: {
     last: 'сейчас', min: 'мин', avg: 'сред', max: 'макс', no_data: 'Нет данных за этот период',
     zoomed: 'Окно', reset: 'Сбросить', hint: 'Выделите участок графика мышью, чтобы приблизить', hide: 'Скрыть или показать',
-    h1: '1ч', h6: '6ч', h24: '24ч', d7: '7д', d30: '30д',
+    m1: '1 мин', h1: '1ч', h6: '6ч', h24: '24ч', d7: '7д', d30: '30д', m1_hint: 'Последняя минута в реальном времени, точка в секунду',
   },
   en: {
     last: 'last', min: 'min', avg: 'avg', max: 'max', no_data: 'No data for this period',
     zoomed: 'Window', reset: 'Reset', hint: 'Drag across a chart to zoom in', hide: 'Hide or show',
-    h1: '1h', h6: '6h', h24: '24h', d7: '7d', d30: '30d',
+    m1: '1 min', h1: '1h', h6: '6h', h24: '24h', d7: '7d', d30: '30d', m1_hint: 'The last minute in real time, a point a second',
   },
 };
 
-const rangeKey: Record<string, 'h1' | 'h6' | 'h24' | 'd7' | 'd30'> = { '1h': 'h1', '6h': 'h6', '24h': 'h24', '7d': 'd7', '30d': 'd30' };
+const rangeKey: Record<string, 'm1' | 'h1' | 'h6' | 'h24' | 'd7' | 'd30'> = { [LIVE_RANGE]: 'm1', '1h': 'h1', '6h': 'h6', '24h': 'h24', '7d': 'd7', '30d': 'd30' };
 
 function fmtWindow(from: number, to: number) {
   const p = (n: number) => String(n).padStart(2, '0');
@@ -28,14 +28,17 @@ function fmtWindow(from: number, to: number) {
 }
 
 /** WindowControl picks the chart window: presets, or shows the dragged one with a way back. */
-export function WindowControl({ range, setRange, zoom, reset, extra }: {
+export function WindowControl({ range, setRange, zoom, reset, extra, ranges = RANGES }: {
   range: string; setRange: (r: string) => void; zoom: { from: number; to: number } | null; reset: () => void; extra?: ReactNode;
+  /** The presets offered; servers put the live LIVE_RANGE first. */
+  ranges?: string[];
 }) {
   const t = useT(L);
+  const live = range === LIVE_RANGE && !zoom;
   return (
     <Group gap="xs" wrap="wrap" justify="flex-end">
       {extra}
-      {zoom ? (
+      {live ? null : zoom ? (
         <Badge size="lg" radius="md" variant="light" color="blue" leftSection={<IconZoomIn size={14} />}
           rightSection={<CloseButton size="xs" variant="transparent" aria-label={t('reset')} onClick={reset} />}
           styles={{ label: { textTransform: 'none', fontFamily: 'var(--mantine-font-family-monospace)', fontWeight: 500 } }}>
@@ -47,7 +50,7 @@ export function WindowControl({ range, setRange, zoom, reset, extra }: {
         </Tooltip>
       )}
       <SegmentedControl size="xs" radius="md" value={zoom ? '' : range} onChange={setRange}
-        data={RANGES.map((r) => ({ value: r, label: t(rangeKey[r]) }))} />
+        data={ranges.map((r) => ({ value: r, label: r === LIVE_RANGE ? <Tooltip label={t('m1_hint')} openDelay={500}><span>{t('m1')}</span></Tooltip> : t(rangeKey[r]) }))} />
     </Group>
   );
 }

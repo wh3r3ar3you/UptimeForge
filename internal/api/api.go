@@ -28,9 +28,11 @@ type Server struct {
 	setupLimit   *limiter
 	userLimit    *limiter // login attempts per username
 	bearerLimit  *limiter // wrong admin bearer tokens per address
+	joinLimit    *limiter // invite exchanges per address
 	trust        trust    // which proxies' X-Forwarded-* count
 	metricsToken string
 	agentSums    agentSums // sha256 of the agent binaries, for checksums.txt
+	rollout      rolloutControl
 
 	trafficMu sync.Mutex
 	traffic   map[string]store.Traffic // last 24h per probe, cached for a minute
@@ -57,7 +59,12 @@ type Options struct {
 func New(a *app.App, opt Options) *Server {
 	s := &Server{app: a, log: a.Log, ui: opt.UI, agentDir: opt.AgentDir, limiter: newLimiter(10, time.Minute),
 		setupToken: opt.SetupToken, setupLimit: newLimiter(10, time.Minute), userLimit: newLimiter(10, 5*time.Minute), bearerLimit: newLimiter(10, time.Minute),
-		trust: newTrust(opt.TrustedProxies), metricsToken: opt.MetricsToken}
+		joinLimit: newLimiter(10, time.Minute), trust: newTrust(opt.TrustedProxies), metricsToken: opt.MetricsToken, rollout: a.Hub}
+	if opt.AgentDir != "" {
+		// What the hub can hand its agents decides whether it rolls out at
+		// all, and to whom.
+		a.Hub.SetAgentFiles(newAgentFiles(opt.AgentDir))
+	}
 	s.announceSetup()
 	return s
 }
@@ -65,7 +72,7 @@ func New(a *app.App, opt Options) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	hub := s.app.Hub.Handler()
-	mux.Handle("GET /api/agent/ws", hub)
+	mux.Handle("GET /api/agent/ws", s.agentAddr(hub))
 	mux.Handle("GET /metrics", s.metricsGuard(hub))
 	mux.Handle("GET /healthz", hub)
 
@@ -98,7 +105,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/probes/{id}", admin(s.deleteProbe))
 	mux.Handle("POST /api/v1/probes/{id}/token", admin(s.rotateToken))
 	mux.Handle("GET /api/v1/probes/{id}/metrics", view(s.probeMetrics))
+	mux.Handle("GET /api/v1/probes/{id}/live", view(s.liveStream))
 	mux.Handle("GET /api/v1/sparklines", view(s.sparklines))
+
+	mux.Handle("POST /api/v1/checkers/invites", admin(s.createInvite))
+	mux.Handle("GET /api/v1/checkers/invites", admin(s.listInvites))
+	mux.Handle("DELETE /api/v1/checkers/invites/{id}", admin(s.revokeInvite))
+	mux.HandleFunc("POST /api/agent/join", s.join)
+	mux.Handle("GET /api/v1/agents/rollout", admin(s.getRollout))
+	mux.Handle("POST /api/v1/agents/rollout/resume", admin(s.resumeRollout))
 
 	mux.Handle("GET /api/v1/incidents", view(s.listIncidents))
 	mux.Handle("POST /api/v1/incidents/{id}/ack", admin(s.ackIncident))
@@ -134,6 +149,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/push/{token}", s.push)
 
 	mux.HandleFunc("GET /install.sh", s.installScript)
+	mux.HandleFunc("GET /join.sh", s.joinScript)
 	mux.HandleFunc("GET /download/{file}", s.download)
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

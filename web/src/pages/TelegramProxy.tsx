@@ -4,7 +4,7 @@ import {
 import { IconAlertCircle, IconPencil, IconPlayerPause, IconPlayerPlay, IconPlus } from '@tabler/icons-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-import { api, ApiError, enc, queryClient, useChecks, useMeta, useProbes, type CheckConfig, type CheckRow } from '../api';
+import { api, ApiError, enc, isChecker, queryClient, useChecks, useMeta, useProbes, type CheckConfig, type CheckRow } from '../api';
 import { useGuardedClose } from '../components/guards';
 import { clickableRow, PageHeader, notifyError, notifyOk, QueryError } from '../components/Misc';
 import { VerdictBadge } from '../components/Status';
@@ -57,7 +57,8 @@ function ProxyForm({ initial, onClose }: { initial?: CheckConfig; onClose: () =>
   const [pristine] = useState(() => JSON.stringify([link, name, nodes]));
   const guard = useGuardedClose(JSON.stringify([link, name, nodes]) !== pristine, onClose);
   const pinned = !!initial && !initial.mtproto?.link; // address + secret, set in the full check form
-  const list = [...(probes.data?.probes ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+  // MTProxy links carry their secret: an untrusted checker agent never gets one.
+  const list = [...(probes.data?.probes ?? [])].filter((p) => !isChecker(p) || p.config.trusted || nodes.includes(p.id)).sort((a, b) => a.name.localeCompare(b.name));
 
   const submit = async () => {
     setErr('');

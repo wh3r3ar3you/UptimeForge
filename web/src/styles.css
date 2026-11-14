@@ -458,7 +458,7 @@ body {
 .uf-bar[data-kind='thin'] { height: 3px; max-width: 90px; }
 .uf-bar[data-kind='gradient'] { height: 10px; max-width: 90px; background: color-mix(in srgb, var(--mantine-color-text) 10%, transparent); }
 .uf-bar[data-kind='gradient'] > span {
-  background: linear-gradient(90deg, #0ca30c 0%, #0ca30c 55%, #fab219 78%, #d03b3b 100%);
+  background: linear-gradient(90deg, var(--uf-ok) 0%, var(--uf-ok) 55%, var(--uf-warn) 78%, var(--uf-down) 100%);
   background-size: calc(100% * 100 / var(--pct, 50)) 100%;
 }
 .uf-bar-seg { display: flex; gap: 2px; flex: none; }
@@ -475,6 +475,35 @@ body {
 
 /* The system cell: a big flag, the name, and where it is and what it runs */
 .uf-sys-flag { font-size: 24px; line-height: 1; flex: none; }
+/* The row state: a dot, or for a Remnawave node its users online in a capsule.
+   With the panel connected the slot is as wide as a capsule, so names line up. */
+.uf-sys-mark { flex: none; display: inline-flex; align-items: center; }
+.uf-sys-mark[data-rw] { min-width: 66px; }
+.uf-users-pill {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  min-width: 66px; height: 28px; padding: 0 9px; border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--c) 60%, transparent);
+  background: color-mix(in srgb, var(--c) 12%, transparent);
+  color: var(--c); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.uf-sys[data-density='compact'] .uf-users-pill { height: 24px; font-size: 13px; padding: 0 7px; }
+
+/* A neon signal palette (themes.ts) makes the indicators glow: on the page
+   when it is the user's pick, and in its own tile in the appearance picker. */
+:root[data-uf-glow] .uf-sys .uf-users-pill, .uf-sig-tile[data-glow] .uf-users-pill {
+  background: color-mix(in srgb, var(--c) 9%, transparent);
+  border-color: var(--c);
+  box-shadow: 0 0 12px -2px color-mix(in srgb, var(--c) 70%, transparent), inset 0 0 10px -4px var(--c);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--c) 85%, transparent);
+}
+:root[data-uf-glow] .uf-sys .uf-bar, .uf-sig-tile[data-glow] .uf-bar,
+:root[data-uf-glow] .uf-sys .uf-bar-seg > span[data-on], .uf-sig-tile[data-glow] .uf-bar-seg > span[data-on] {
+  box-shadow: 0 0 8px -1px color-mix(in srgb, var(--c) 75%, transparent);
+}
+:root[data-uf-glow] .uf-sys .uf-dot, :root[data-uf-glow] .uf-checks .uf-dot, .uf-sig-tile[data-glow] .uf-dot { box-shadow: 0 0 8px var(--uf-pulse); }
+:root[data-uf-glow] .uf-checks .uf-pulse-bar > span[data-on] { box-shadow: 0 0 6px -1px var(--c); }
+
+.uf-sig-sample { display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 10px; min-height: 52px; }
 .uf-sys-name { font-size: 17px; font-weight: 700; line-height: 1.25; letter-spacing: -0.01em; }
 .uf-sys-sub { font-size: 12.5px; line-height: 1.3; margin-top: 2px; }
 .uf-sys[data-density='compact'] .uf-sys-flag { font-size: 20px; }
