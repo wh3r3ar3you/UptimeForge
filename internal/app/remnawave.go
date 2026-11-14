@@ -84,6 +84,7 @@ func (a *App) refreshRemnawave(ctx context.Context) {
 	var statsErr error
 	if err == nil {
 		stats, statsErr = c.PanelStats(ctx, nodes)
+		a.addrs.resolve(ctx, nodes) // servers match their node by address too
 	}
 	// The 7-day per-node traffic chart changes slowly.
 	a.mu.Lock()
@@ -249,7 +250,7 @@ func (a *App) prune(ctx context.Context, nodes []remnawave.Node) {
 			paused = append(paused, c.ID)
 		}
 		for _, p := range a.Probes() {
-			if !p.Managed && p.ID != "hub" && sameNode(n, p.ID, p.Name, "") {
+			if !p.Managed && p.ID != "hub" && hub.IsNodeProbe(hub.ProbeRef{Link: p.RemnawaveNode, ID: p.ID, Name: p.Name}, hub.NodeRef{ID: n.UUID, Name: n.Name}) {
 				servers = append(servers, p.ID)
 			}
 		}

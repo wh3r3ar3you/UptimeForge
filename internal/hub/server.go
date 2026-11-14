@@ -280,6 +280,8 @@ type ProbeStatus struct {
 	Failing   int               `json:"failing"`
 	// Network is where an agent connects from (nil until it has).
 	Network *NetworkView `json:"network,omitempty"`
+	// RemnawaveNode is the panel node the server is linked to by hand.
+	RemnawaveNode string `json:"remnawave_node,omitempty"`
 }
 
 type CheckStatus struct {
@@ -319,7 +321,7 @@ func (h *Hub) Snapshot() Status {
 		} else if p.cfg.Local {
 			mode = "local"
 		}
-		ps := ProbeStatus{ID: id, Name: p.cfg.Name, Labels: p.cfg.Labels, Region: p.cfg.Labels[h.cfg.RegionLabel], Mode: mode,
+		ps := ProbeStatus{ID: id, Name: p.cfg.Name, RemnawaveNode: p.cfg.RemnawaveNode, Labels: p.cfg.Labels, Region: p.cfg.Labels[h.cfg.RegionLabel], Mode: mode,
 			Online: p.online, Internet: !p.noNet, Since: p.since, Version: p.hello.Version, Host: p.hello.Hostname}
 		if !p.cfg.Checker() { // someone else's machine: its host stays its owner's
 			ps.SysInfo, ps.Metrics, ps.MetricsAt = p.sysinfo, p.metrics, p.metricsAt

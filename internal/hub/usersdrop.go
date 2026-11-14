@@ -322,7 +322,7 @@ func (h *Hub) ObserveUsers(at time.Time, nodes []NodeUsers) {
 	for _, n := range down {
 		key, t := "rw:"+n.ID, h.users[n.ID]
 		inc := h.incidents[key]
-		if inc == nil && (at.Sub(t.downSince) < nodeDownAfter || h.agentDown(n.Name, t.downSince)) {
+		if inc == nil && (at.Sub(t.downSince) < nodeDownAfter || h.agentDown(n, t.downSince)) {
 			continue
 		}
 		before := t.downFrom
@@ -376,15 +376,11 @@ const agentAlertWindow = 10 * time.Minute
 // now and its alert is still within its grace. An agent closed by hand,
 // muted, or offline since long before (never connected, say) says nothing
 // about this outage, so node_down does not yield to it. Probes and panel
-// nodes are matched by name, ignoring case and a "(comment)" suffix.
-func (h *Hub) agentDown(node string, lostAt time.Time) bool {
-	name := nodeKey(node)
-	if name == "" {
-		return false
-	}
+// nodes are matched by IsNodeProbe.
+func (h *Hub) agentDown(n NodeUsers, lostAt time.Time) bool {
 	now := time.Now()
 	for id, p := range h.probes {
-		if (nodeKey(p.cfg.Name) != name && nodeKey(id) != name) || p.online {
+		if p.online || !IsNodeProbe(ProbeRef{Link: p.cfg.RemnawaveNode, ID: id, Name: p.cfg.Name, Host: p.hello.Hostname, Addr: p.addr}, n.Ref()) {
 			continue
 		}
 		key := "probe:" + id
@@ -401,10 +397,6 @@ func (h *Hub) agentDown(node string, lostAt time.Time) bool {
 	}
 	return false
 }
-
-// NodeKey is how a panel node and an agent are matched by name: the name
-// before any "(…)" note, case-insensitive.
-func NodeKey(s string) string { return nodeKey(s) }
 
 func nodeKey(s string) string {
 	s, _, _ = strings.Cut(s, "(")

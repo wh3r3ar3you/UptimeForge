@@ -16,7 +16,7 @@ import {
 import { bitrate, bytes, compact, days, duration, flag, num } from '../format';
 import { useCommon, useLang, useT } from '../i18n';
 import { usePrefs, type BarStyle, type Prefs } from '../prefs';
-import { status } from '../theme';
+import { sig, status } from '../theme';
 import { clickableRow, notifyError, notifyOk } from './Misc';
 import { ProbeForm, TokenModal } from './ProbeForm';
 import { Dot } from './Status';
@@ -210,23 +210,16 @@ export const COLUMNS: Col[] = [
 export const DEFAULT_COLUMNS = ['cpu', 'steal', 'mem', 'disk', 'load', 'net', 'traffic', 'users', 'uptime', 'agent'];
 const SYSTEM_WIDTH = 270;
 
-/** sig are the indicator colours: the user's signal palette (themes.ts), set on the page. */
-export const sig = { ok: 'var(--uf-ok)', warn: 'var(--uf-warn)', down: 'var(--uf-down)' } as const;
 const ROW = { compact: 46, normal: 64, comfortable: 76 } as const;
 
-function hostOf(s?: string) {
-  return (s ?? '').toLowerCase().replace(/^\[|\]$/g, '').replace(/:\d+$/, '');
-}
-
-/** useRemnawaveIndex finds the panel node of a server by name, id or address. */
+/**
+ * useRemnawaveIndex finds the panel node of a server, as the hub matched it
+ * (rw_node): linked by hand in its settings, by name, or by address.
+ */
 export function useRemnawaveIndex(nodes?: RemnawaveNode[]) {
   return useMemo(() => {
-    const by = new Map<string, RemnawaveNode>();
-    for (const n of nodes ?? []) {
-      by.set(n.name.toLowerCase(), n);
-      if (n.address) by.set(hostOf(n.address), n);
-    }
-    return (p: ProbeRow) => by.get(p.name.toLowerCase()) ?? by.get(p.id.toLowerCase()) ?? (p.host ? by.get(hostOf(p.host)) : undefined);
+    const ids = new Map((nodes ?? []).map((n) => [n.uuid, n]));
+    return (p: ProbeRow) => (p.rw_node ? ids.get(p.rw_node) : undefined);
   }, [nodes]);
 }
 

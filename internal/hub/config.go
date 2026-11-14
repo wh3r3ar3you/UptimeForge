@@ -140,6 +140,10 @@ type ProbeConfig struct {
 	Trusted bool `yaml:"trusted" json:"trusted,omitempty"`
 	// LabelsLocked names the labels an admin set by hand.
 	LabelsLocked []string `yaml:"labels_locked" json:"labels_locked,omitempty"`
+	// RemnawaveNode links a server to its Remnawave panel node by the node's
+	// uuid, for a server named apart from its node. Empty: matched by name
+	// (IsNodeProbe).
+	RemnawaveNode string `yaml:"remnawave_node" json:"remnawave_node,omitempty"`
 }
 
 const (
@@ -397,6 +401,9 @@ func (c *Config) normalize() error {
 		}
 		if p.Role != "" && p.Virtual() {
 			return fmt.Errorf("probe %s: role is only for agents", p.ID)
+		}
+		if p.RemnawaveNode != "" && (p.Checker() || len(p.RemnawaveNode) > 64) {
+			return fmt.Errorf("probe %s: remnawave_node is a panel node uuid, only for servers", p.ID)
 		}
 		if p.Trusted && !p.Checker() {
 			return fmt.Errorf("probe %s: trusted is only for role %s", p.ID, RoleChecker)

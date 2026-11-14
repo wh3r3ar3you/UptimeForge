@@ -107,6 +107,8 @@ export interface ProbeConfig {
   trusted?: boolean;
   /** Labels set by hand: the network lookup leaves them alone. */
   labels_locked?: string[];
+  /** The Remnawave panel node (its uuid) this server is, when their names differ. */
+  remnawave_node?: string;
 }
 
 /** isChecker: a volunteer probe point, not our infrastructure. */
@@ -117,6 +119,8 @@ export interface ProbeRow extends ProbeStatus {
   config: ProbeConfig; managed: boolean;
   /** Bytes moved over the last day, from stored metrics. */
   traffic_24h?: { rx: number; tx: number };
+  /** The uuid of the Remnawave node this server is: linked by hand, by name or by address (the hub matches). */
+  rw_node?: string;
 }
 
 /** An invite code for a checker agent; the code itself is shown once, on creation. */

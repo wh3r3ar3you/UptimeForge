@@ -64,6 +64,7 @@ type App struct {
 	rec       *recorder
 	rw        remnawaveState
 	nodes     nodeSnapshot
+	addrs     nodeAddrs // what the nodes' host names resolve to
 	geo       geoDB
 	geoNeed   chan struct{} // wakes keepGeo: something wants a lookup
 

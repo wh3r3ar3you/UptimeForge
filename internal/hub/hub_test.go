@@ -1263,6 +1263,36 @@ func TestNodeDownDefersToTheAgent(t *testing.T) {
 	}
 }
 
+// A server linked to its panel node by hand (its name differs) is the
+// node's agent as a namesake is; a server linked to another node is not,
+// whatever its name.
+func TestNodeDownDefersToTheLinkedAgent(t *testing.T) {
+	h, rec := dropHub(t)
+	t0 := time.Now().Add(-3 * time.Hour)
+	h.mu.Lock()
+	h.probes["de"].online = false
+	h.probes["de"].cfg.RemnawaveNode = "de" // the panel's uuid of the node named "provider-de"
+	h.mu.Unlock()
+	nd := func(n NodeUsers) NodeUsers { n.Name = "provider-de"; return n }
+	fleet := func(de NodeUsers) []NodeUsers { return []NodeUsers{de, node("swe", 880), node("pl", 650)} }
+	feedUsers(h, t0, 0, 120, func(int) []NodeUsers { return fleet(nd(node("de", 470))) })
+	feedUsers(h, t0, 120, 140, func(int) []NodeUsers { return fleet(nd(lost("de"))) })
+	if rec.find(model.EventOpen, "rw:de") != nil {
+		t.Fatal("the linked agent's alert already says this server is down")
+	}
+
+	h2, rec2 := dropHub(t)
+	h2.mu.Lock()
+	h2.probes["de"].online = false
+	h2.probes["de"].cfg.RemnawaveNode = "another-node" // the same name, linked elsewhere
+	h2.mu.Unlock()
+	feedUsers(h2, t0, 0, 120, func(int) []NodeUsers { return fleet(node("de", 470)) })
+	feedUsers(h2, t0, 120, 140, func(int) []NodeUsers { return fleet(lost("de")) })
+	if ev := rec2.find(model.EventOpen, "rw:de"); ev == nil || ev.Incident.Kind != model.KindNodeDown {
+		t.Fatalf("a server linked to another node says nothing about this one: %+v", ev)
+	}
+}
+
 // A ban in progress, then the node is lost: the open drop becomes "node
 // down" in place rather than a second alert; most nodes lost at once say so.
 func TestNodeDownTakesOverAndMass(t *testing.T) {
@@ -1716,10 +1746,46 @@ func TestParentsOtherPortIsNoParent(t *testing.T) {
 	}
 }
 
-// A panel node and its agent match by name, ignoring case and a "(…)" note.
-func TestNodeKey(t *testing.T) {
-	if NodeKey("NL-1 (Amsterdam)") != "nl-1" || NodeKey(" de-node ") != "de-node" || NodeKey("a") == NodeKey("b") {
-		t.Fatal(NodeKey("NL-1 (Amsterdam)"))
+// A panel node and its agent match by name or id, ignoring case and a "(…)"
+// note; a server linked to a node by hand matches that node only.
+func TestIsNodeProbe(t *testing.T) {
+	addr := netip.MustParseAddr
+	uk := NodeRef{ID: "u1", Name: "provider-uk", Address: "uk.example.com", IPs: []string{"203.0.113.7"}}
+	for _, c := range []struct {
+		p    ProbeRef
+		n    NodeRef
+		want bool
+	}{
+		{ProbeRef{ID: "nl-1", Name: "NL-1"}, NodeRef{ID: "u1", Name: "nl-1 (Amsterdam)"}, true},
+		{ProbeRef{ID: "x", Name: " de-node "}, NodeRef{ID: "u1", Name: "DE-node"}, true},
+		{ProbeRef{ID: "de-wl", Name: "de-wl"}, NodeRef{ID: "u1", Name: "de-wl(spare)"}, true},
+		{ProbeRef{ID: "a", Name: "a"}, NodeRef{ID: "u1", Name: "b"}, false},
+		{ProbeRef{ID: "a", Name: "a"}, NodeRef{ID: "u1", Name: " (note)"}, false},
+		// linked by hand: that node only, whatever the names
+		{ProbeRef{Link: "u1", ID: "uk-1", Name: "uk-1"}, uk, true},
+		{ProbeRef{Link: "u2", ID: "de", Name: "de"}, NodeRef{ID: "u1", Name: "de"}, false},
+		// the agent's host name is the node's address
+		{ProbeRef{ID: "uk-1", Name: "uk-1", Host: "UK.example.com"}, uk, true},
+		// the agent connects from the node's public address (resolved or the panel's)
+		{ProbeRef{ID: "uk-1", Name: "uk-1", Addr: addr("203.0.113.7")}, uk, true},
+		{ProbeRef{ID: "s", Name: "s", Addr: addr("::ffff:198.51.100.4")}, NodeRef{ID: "u3", Name: "n", Address: "198.51.100.4"}, true},
+		// a private or CGNAT address is the hub's own NAT, not the node
+		{ProbeRef{ID: "s", Name: "s", Addr: addr("192.168.1.1")}, NodeRef{ID: "u3", Name: "n", Address: "192.168.1.1"}, false},
+		{ProbeRef{ID: "s", Name: "s", Addr: addr("100.64.1.1")}, NodeRef{ID: "u3", Name: "n", IPs: []string{"100.64.1.1"}}, false},
+		{ProbeRef{ID: "s", Name: "s", Addr: addr("203.0.113.8")}, uk, false},
+	} {
+		if got := IsNodeProbe(c.p, c.n); got != c.want {
+			t.Errorf("IsNodeProbe(%+v, %+v) = %v", c.p, c.n, got)
+		}
+	}
+	// A name beats an address: the server named after one node and behind
+	// another's address is the named one's.
+	nodes := []NodeRef{{ID: "a", Name: "a", Address: "203.0.113.9"}, {ID: "b", Name: "b"}}
+	if n, ok := MatchNode(ProbeRef{ID: "b", Name: "b", Addr: addr("203.0.113.9")}, nodes); !ok || n.ID != "b" {
+		t.Fatalf("MatchNode = %+v, %v", n, ok)
+	}
+	if _, ok := MatchNode(ProbeRef{ID: "z", Name: "z"}, nodes); ok {
+		t.Fatal("no match must say so")
 	}
 }
 
@@ -2640,6 +2706,7 @@ func TestCheckerRoleValidation(t *testing.T) {
 		{"local checker", ProbeConfig{ID: "l", Local: true, Role: RoleChecker}, "role is only for agents"},
 		{"trusted server", ProbeConfig{ID: "s", Token: "token-s-0123456789", Trusted: true}, "trusted"},
 		{"unknown role", ProbeConfig{ID: "u", Token: "token-u-0123456789", Role: "boss"}, "role"},
+		{"linked checker", ProbeConfig{ID: "k", Token: "token-k-0123456789", Role: RoleChecker, RemnawaveNode: "u1"}, "remnawave_node"},
 	}
 	for _, tc := range cases {
 		c := &Config{Probes: []ProbeConfig{tc.p}}
@@ -2651,6 +2718,7 @@ func TestCheckerRoleValidation(t *testing.T) {
 		{ID: "chk", Token: "token-chk-0123456789", Role: RoleChecker, Trusted: true},
 		// A stale label from when it was a checker must not keep it in "role=checker".
 		{ID: "srv", Token: "token-srv-0123456789", Role: RoleServer, Labels: map[string]string{"role": RoleChecker}},
+		{ID: "lnk", Token: "token-lnk-0123456789", RemnawaveNode: "5b0c1c9e-2f8a-4c3e-9d41-7a2b6e0f1d23"},
 	}}
 	if err := c.normalize(); err != nil {
 		t.Fatal(err)

@@ -23,6 +23,9 @@ type ProbeRow struct {
 	Managed bool            `json:"managed"`
 	// Traffic24h is bytes moved over the last day, from stored metrics.
 	Traffic24h *store.Traffic `json:"traffic_24h,omitempty"`
+	// RwNode is the uuid of the Remnawave panel node this server is
+	// (hub.MatchNode): linked by hand, by name or by address.
+	RwNode string `json:"rw_node,omitempty"`
 }
 
 func (s *Server) listProbes(w http.ResponseWriter, r *http.Request) {
@@ -36,6 +39,8 @@ func (s *Server) listProbes(w http.ResponseWriter, r *http.Request) {
 		}
 		items[p.ID] = p
 	}
+	// Matched before the redaction: a viewer gets the node, not the address.
+	rw := matchNodes(snap.Probes, s.app.NodeRefs())
 	if viewer {
 		redactProbeStatus(snap.Probes)
 	}
@@ -43,13 +48,24 @@ func (s *Server) listProbes(w http.ResponseWriter, r *http.Request) {
 	rows := make([]ProbeRow, 0, len(snap.Probes))
 	for _, ps := range snap.Probes {
 		it := items[ps.ID]
-		row := ProbeRow{ProbeStatus: ps, Config: it.ProbeConfig, Managed: it.Managed}
+		row := ProbeRow{ProbeStatus: ps, Config: it.ProbeConfig, Managed: it.Managed, RwNode: rw[ps.ID]}
 		if tr, ok := traffic[ps.ID]; ok {
 			row.Traffic24h = &tr
 		}
 		rows = append(rows, row)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"probes": rows, "hub_url": s.hubURL(r)})
+}
+
+// matchNodes is the panel node of every server that is one, by probe id.
+func matchNodes(probes []hub.ProbeStatus, nodes []hub.NodeRef) map[string]string {
+	out := map[string]string{}
+	for _, ps := range probes {
+		if n, ok := hub.MatchNode(ps.Ref(), nodes); ok {
+			out[ps.ID] = n.ID
+		}
+	}
+	return out
 }
 
 // traffic24h is every probe's last-day traffic, cached for a minute: the

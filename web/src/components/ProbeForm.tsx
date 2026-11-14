@@ -1,7 +1,7 @@
 import { Alert, Autocomplete, Button, Group, Modal, NumberInput, SegmentedControl, Select, Stack, Switch, Tabs, Text, TextInput, Textarea } from '@mantine/core';
 import { IconAlertCircle, IconAlertTriangle, IconBrandDocker, IconBinary, IconTerminal2 } from '@tabler/icons-react';
 import { useEffect, useRef, useState } from 'react';
-import { api, ApiError, queryClient, type Install, type NetworkView, type ProbeConfig } from '../api';
+import { api, ApiError, queryClient, useRemnawave, type Install, type NetworkView, type ProbeConfig } from '../api';
 import { countryMatches, countryOptions } from '../format';
 import { useCommon, useLang, useT } from '../i18n';
 import { CopyBlock, notifyOk } from './Misc';
@@ -18,6 +18,7 @@ const L = {
     via: 'Ссылка на прокси', via_ph: 'socks5://user:pass@1.2.3.4:1080 или vless://…', concurrency: 'Параллельных проверок',
     install: 'Установка агента', once: 'Токен показан один раз. Сохраните команду — потом токен можно только перевыпустить.',
     plain_http: 'Хаб открыт по http: токен агента и все проверки (с VPN-ссылками) пойдут открытым текстом. Включите HTTPS и задайте UF_PUBLIC_URL с https://.',
+    rw_node: 'Нода Remnawave', rw_node_hint: 'Укажите, если хаб не нашёл ноду сам. Пусто — по имени, адресу ноды или IP, с которого подключается агент.', rw_node_gone: 'нода удалена из панели',
     probing: 'Запускать проверки с этого сервера', probing_hint: 'Выключено: агент только присылает метрики сервера (ЦП, память, диск, сеть). Включите, если сервер должен ещё и проверять ваши сервисы из своей сети.', nothing: 'Не найдено',
     compose: 'Docker Compose', compose_oneline: 'Одной командой', compose_hint: 'Вставьте на сервере: создаст /opt/uptimeforge-agent/compose.yml и запустит агента. Нужны Docker и compose.', compose_file: 'Или только compose.yml',
     private_hub: 'Хаб указан как {0}: это внутренний адрес, агенты из других сетей до него не достанут. Задайте публичный адрес в настройках → Public URL и создайте токен заново.',
@@ -41,6 +42,7 @@ const L = {
     via: 'Proxy link', via_ph: 'socks5://user:pass@1.2.3.4:1080 or vless://…', concurrency: 'Parallel checks',
     install: 'Install the agent', once: 'The token is shown once. Keep the command — later you can only rotate the token.',
     plain_http: 'The hub is served over http: the agent token and every check (with VPN links) travel in clear text. Enable HTTPS and set UF_PUBLIC_URL to https://.',
+    rw_node: 'Remnawave node', rw_node_hint: 'Pick it when the hub did not find the node itself. Empty: matched by name, by the node address or by the IP the agent connects from.', rw_node_gone: 'node deleted from the panel',
     probing: 'Run checks from this server', probing_hint: 'Off: the agent only reports server metrics (CPU, memory, disk, network). Turn it on if this server should also test your services from its network.', nothing: 'Nothing found',
     compose: 'Docker Compose', compose_oneline: 'One command', compose_hint: 'Paste it on the server: it writes /opt/uptimeforge-agent/compose.yml and starts the agent. Needs Docker with compose.', compose_file: 'Or just compose.yml',
     private_hub: 'The hub address is {0}: a private address that agents in other networks cannot reach. Set a public address in Settings → Public URL and create the token again.',
@@ -183,6 +185,7 @@ export function ProbeForm({ initial, network, opened, onClose, hubURL }: {
     if (!checker || !v) return undefined;
     return p.labels_locked?.includes(k) || v !== shown[k] ? t('locked') : t('from_net');
   };
+  const rwq = useRemnawave();
   const [mode, setMode] = useState<'agent' | 'via' | 'local'>(initial?.via ? 'via' : initial?.local ? 'local' : 'agent');
   const [idTouched, setIdTouched] = useState(editing);
   const [err, setErr] = useState('');
@@ -258,9 +261,17 @@ export function ProbeForm({ initial, network, opened, onClose, hubURL }: {
               <SegmentedControl value={checker ? 'checker' : 'server'} fullWidth
                 data={[{ value: 'server', label: t('r_server') }, { value: 'checker', label: t('r_checker') }]}
                 // Trusted belongs to a checker: the hub refuses it on anything else.
-                onChange={(v) => setP((x) => (v === 'checker' ? { ...x, role: 'checker' } : { ...x, role: undefined, trusted: undefined }))} />
+                onChange={(v) => setP((x) => (v === 'checker' ? { ...x, role: 'checker', remnawave_node: undefined } : { ...x, role: undefined, trusted: undefined }))} />
               {checker && <Text size="xs" c="dimmed">{t('r_checker_hint')}</Text>}
             </Stack>
+          )}
+          {!checker && rwq.data?.configured && (
+            <Select label={t('rw_node')} description={t('rw_node_hint')} searchable clearable nothingFoundMessage={t('nothing')}
+              data={[
+                ...(rwq.data.nodes ?? []).map((n) => ({ value: n.uuid, label: n.address ? `${n.name} · ${n.address}` : n.name })),
+                ...(p.remnawave_node && !rwq.data.nodes?.some((n) => n.uuid === p.remnawave_node) ? [{ value: p.remnawave_node, label: t('rw_node_gone') }] : []),
+              ]}
+              value={p.remnawave_node ?? null} onChange={(v) => setP((x) => ({ ...x, remnawave_node: v || undefined }))} />
           )}
           {mode === 'agent' && !checker && (
             <Switch checked={!!p.probing} onChange={(e) => { const probing = e.currentTarget.checked; setP((x) => ({ ...x, probing })); }}
