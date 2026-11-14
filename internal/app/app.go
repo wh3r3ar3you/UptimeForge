@@ -65,6 +65,7 @@ type App struct {
 	rw        remnawaveState
 	nodes     nodeSnapshot
 	geo       geoDB
+	geoNeed   chan struct{} // wakes keepGeo: something wants a lookup
 
 	inviteMu sync.Mutex // one invite change at a time: a code is spent once
 }
@@ -86,7 +87,8 @@ func New(opt Options, log *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{Opt: opt, Log: log, Store: st, rec: newRecorder(), geo: &geoip.DB{Dir: filepath.Join(opt.DataDir, "geoip")}}
+	a := &App{Opt: opt, Log: log, Store: st, rec: newRecorder(), geo: &geoip.DB{Dir: filepath.Join(opt.DataDir, "geoip"), LookupOnly: true},
+		geoNeed: make(chan struct{}, 1)}
 	a.managed.probes, a.managed.checks, a.managed.sections = map[string]bool{}, map[string]bool{}, map[string]bool{}
 
 	if opt.ConfigPath != "" {
@@ -326,8 +328,9 @@ func (a *App) Run(ctx context.Context) error {
 	a.mu.Unlock()
 
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(4)
 	go func() { defer wg.Done(); a.rec.run(ctx, a.Store, a.Log) }()
+	go func() { defer wg.Done(); a.keepGeo(ctx, sleepCtx) }()
 	go func() { defer wg.Done(); a.pollRemnawave(ctx) }()
 	go func() { defer wg.Done(); a.reportLoop(ctx) }()
 	err := a.Hub.Run(ctx)

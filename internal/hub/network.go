@@ -103,6 +103,24 @@ func (h *Hub) SetNetwork(probeID string, n geoip.Network) {
 	h.evaluateAll(now)
 }
 
+// UnknownNetworks is the address of every online agent nothing is known about
+// yet (no country, no ASN): connected while the geo databases were missing,
+// or its lookup failed. The app looks them up again once a database arrives.
+func (h *Hub) UnknownNetworks() map[string]netip.Addr {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := map[string]netip.Addr{}
+	for id, p := range h.probes {
+		if !p.online || p.cfg.Virtual() || !p.addr.IsValid() {
+			continue
+		}
+		if n := p.network; n == nil || n.Country == "" && n.ASN == "" {
+			out[id] = p.addr
+		}
+	}
+	return out
+}
+
 // setLabels gives one probe new labels. The config is copied, not changed in
 // place: Config and Snapshot hand it out, and it is read without the lock.
 // Callers hold h.mu.

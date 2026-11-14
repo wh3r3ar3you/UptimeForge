@@ -518,6 +518,8 @@ func (f fakeGeo) Network(_ context.Context, ip netip.Addr) (geoip.Network, error
 	return geoip.Network{IP: ip, Country: f[ip.String()]}, nil
 }
 
+func (fakeGeo) Prepare(context.Context) error { return nil }
+
 // The country of a proxy comes from the address its link points at; a link
 // that cannot be read is a validation error that does not repeat it.
 func TestLocateProxy(t *testing.T) {
@@ -679,6 +681,147 @@ func (f netGeo) Network(_ context.Context, ip netip.Addr) (geoip.Network, error)
 	n := f[ip.String()]
 	n.IP = ip
 	return n, nil
+}
+
+func (netGeo) Prepare(context.Context) error { return nil }
+
+// lateGeo has no database until Prepare has failed fails times.
+type lateGeo struct {
+	mu       sync.Mutex
+	fails    int
+	ready    bool
+	lookups  int
+	prepares int
+}
+
+func (g *lateGeo) Prepare(context.Context) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.prepares++
+	if g.fails > 0 {
+		g.fails--
+		return errors.New("download failed")
+	}
+	g.ready = true
+	return nil
+}
+
+func (g *lateGeo) Country(ctx context.Context, ip netip.Addr) (string, error) {
+	n, err := g.Network(ctx, ip)
+	return n.Country, err
+}
+
+func (g *lateGeo) Network(_ context.Context, ip netip.Addr) (geoip.Network, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.lookups++
+	if !g.ready {
+		return geoip.Network{IP: ip}, errors.New("geoip database is not downloaded yet")
+	}
+	return geoip.Network{IP: ip, Country: "ru", ASN: "as8359", Org: "MTS PJSC"}, nil
+}
+
+func (g *lateGeo) looked() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.lookups
+}
+
+// Nothing is downloaded until something wants a lookup: the tests, the demo
+// and a hub with agents on private addresses only never reach db-ip.com.
+func TestGeoWaitsUntilNeeded(t *testing.T) {
+	a := newApp(t, Options{DatabaseURL: pgtest.URL(t), DataDir: t.TempDir()})
+	defer a.Store.Close()
+	geo := &lateGeo{}
+	a.geo = geo
+	a.agentAddr("p", netip.MustParseAddr("10.0.0.1")) // a private address wants nothing
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	a.keepGeo(ctx, func(context.Context, time.Duration) bool { return false })
+	if geo.prepares != 0 {
+		t.Fatalf("downloaded %d times with nobody asking", geo.prepares)
+	}
+	a.agentAddr("p", netip.MustParseAddr("203.0.113.7"))
+	a.keepGeo(context.Background(), func(context.Context, time.Duration) bool { return false })
+	if geo.prepares != 1 {
+		t.Fatalf("a public agent must start the download: %d", geo.prepares)
+	}
+}
+
+// The "add server" form may wait for the first download: it gets its
+// country on the first try even on a hub that has no database yet.
+func TestLocateProxyDownloadsOnFirstUse(t *testing.T) {
+	a := newApp(t, Options{DatabaseURL: pgtest.URL(t), DataDir: t.TempDir()})
+	defer a.Store.Close()
+	geo := &lateGeo{}
+	a.geo = geo
+	loc, err := a.LocateProxy(context.Background(), "socks5://user:secret@203.0.113.7:1080")
+	if err != nil || loc.Country != "ru" {
+		t.Fatalf("first use: %+v %v", loc, err)
+	}
+	geo.fails, geo.ready = 1, false
+	if _, err := a.LocateProxy(context.Background(), "socks5://user:secret@203.0.113.7:1080"); err == nil {
+		t.Fatal("a failed download must be an error")
+	}
+}
+
+func TestGeoBackoff(t *testing.T) {
+	var got []time.Duration
+	var d time.Duration
+	for range 9 {
+		d = geoBackoff(d)
+		got = append(got, d)
+	}
+	want := []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, 32 * time.Minute, time.Hour, time.Hour, time.Hour}
+	if !slices.Equal(got, want) {
+		t.Fatalf("backoff %v, want %v", got, want)
+	}
+}
+
+// An agent that connected before the geo databases came down is looked up
+// again once they do: it gets its network labels without reconnecting. The
+// download is retried with a growing pause meanwhile.
+func TestGeoReadyLooksUpWaitingAgents(t *testing.T) {
+	ctx := context.Background()
+	a := newApp(t, Options{DatabaseURL: pgtest.URL(t), DataDir: t.TempDir()})
+	defer a.Store.Close()
+	geo := &lateGeo{fails: 2}
+	a.geo = geo
+	token, err := a.SaveProbe(ctx, hub.ProbeConfig{ID: "home", Name: "Дом", Role: hub.RoleChecker}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := a.Hub.Handler()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agents.ServeHTTP(w, r.WithContext(hub.WithClientIP(r.Context(), netip.MustParseAddr("203.0.113.7"))))
+	}))
+	defer srv.Close()
+	actx, stop := context.WithCancel(ctx)
+	defer stop()
+	go agent.New(actx, agent.Config{HubURL: srv.URL, Token: token, MetricsInterval: -1}, a.Log).Run(actx)
+	if !eventually(10*time.Second, func() bool { return geo.looked() > 0 }) {
+		t.Fatal("the agent's address was never looked up")
+	}
+	if _, ok := a.Hub.UnknownNetworks()["home"]; !ok {
+		t.Fatal("setup: without a database the agent's network must be unknown")
+	}
+
+	var waits []time.Duration
+	a.keepGeo(ctx, func(_ context.Context, d time.Duration) bool {
+		waits = append(waits, d)
+		return d != geoRefresh // stop once the databases are there
+	})
+	if want := []time.Duration{time.Minute, 2 * time.Minute, geoRefresh}; !slices.Equal(waits, want) {
+		t.Fatalf("waits %v, want %v", waits, want)
+	}
+	var obj hub.ProbeConfig
+	if !eventually(10*time.Second, func() bool {
+		obj = hub.ProbeConfig{}
+		return a.Store.GetObject(ctx, kindProbe, "home", &obj) == nil &&
+			obj.Labels["country"] == "ru" && obj.Labels["asn"] == "as8359" && obj.Labels["isp"] == "mts"
+	}) {
+		t.Fatalf("the waiting agent was not looked up again: labels %v", obj.Labels)
+	}
 }
 
 // A checker that connects is labelled by its network, and the labels are

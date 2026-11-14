@@ -1,7 +1,8 @@
 // Package geoip says which country and which operator (ASN) an IP address
 // belongs to, from the DB-IP IP-to-Country and IP-to-ASN Lite databases
-// (CC BY 4.0, https://db-ip.com). The hub downloads them on first use and
-// refreshes them monthly, so lookups never send an address anywhere.
+// (CC BY 4.0, https://db-ip.com). They are downloaded on first use, or by
+// Prepare in the background (LookupOnly), and refreshed monthly, so lookups
+// never send an address anywhere.
 package geoip
 
 import (
@@ -69,6 +70,10 @@ type DB struct {
 	URL    func(month time.Time) string
 	ASNURL func(month time.Time) string
 	Now    func() time.Time
+	// LookupOnly keeps Country and Network off the network: they answer from
+	// the files already on disk (a stale one too) and Prepare is what
+	// downloads. Without it the first lookup downloads.
+	LookupOnly bool
 
 	open    func(path string) (table, error)
 	openASN func(path string) (asnTable, error)
@@ -109,7 +114,7 @@ func (d *DB) asnURL(m time.Time) string {
 // Country returns the lower-case ISO code of ip's country, "" when the
 // database does not know it.
 func (d *DB) Country(ctx context.Context, ip netip.Addr) (string, error) {
-	t, err := load(ctx, d, &d.country, "dbip-country", d.url, d.countryOpener())
+	t, err := load(ctx, d, &d.country, "dbip-country", d.url, d.countryOpener(), d.lookupMode())
 	if err != nil {
 		return "", err
 	}
@@ -130,7 +135,7 @@ func (d *DB) Network(ctx context.Context, ip netip.Addr) (Network, error) {
 	n.Country = cc
 
 	var aerr error
-	if t, err := load(ctx, d, &d.asn, "dbip-asn", d.asnURL, d.asnOpener()); err != nil {
+	if t, err := load(ctx, d, &d.asn, "dbip-asn", d.asnURL, d.asnOpener(), d.lookupMode()); err != nil {
 		aerr = err
 	} else {
 		var num uint
@@ -144,8 +149,34 @@ func (d *DB) Network(ctx context.Context, ip netip.Addr) (Network, error) {
 	return n, nil
 }
 
+// Prepare downloads whichever database is missing or due a refresh, in ctx
+// (not a lookup's), whenever it is called: a failure a while ago does not
+// hold it back, the caller paces the retries. The error names the databases
+// still missing; a stale one that could not be refreshed is no error.
+func (d *DB) Prepare(ctx context.Context) error {
+	_, cerr := load(ctx, d, &d.country, "dbip-country", d.url, d.countryOpener(), fetchNow)
+	_, aerr := load(ctx, d, &d.asn, "dbip-asn", d.asnURL, d.asnOpener(), fetchNow)
+	return errors.Join(cerr, aerr)
+}
+
+// fetch says whether load may download.
+type fetch int
+
+const (
+	fetchPaced fetch = iota // download, but not again within retryAfter of a failure
+	fetchNever              // only what is on disk
+	fetchNow                // download if needed, whenever the last failure was
+)
+
+func (d *DB) lookupMode() fetch {
+	if d.LookupOnly {
+		return fetchNever
+	}
+	return fetchPaced
+}
+
 // load returns the slot's database, downloading or refreshing it as needed.
-func load[T io.Closer](ctx context.Context, d *DB, s *slot[T], prefix string, url func(time.Time) string, open func(string) (T, error)) (T, error) {
+func load[T io.Closer](ctx context.Context, d *DB, s *slot[T], prefix string, url func(time.Time) string, open func(string) (T, error), mode fetch) (T, error) {
 	var zero T
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -160,7 +191,16 @@ func load[T io.Closer](ctx context.Context, d *DB, s *slot[T], prefix string, ur
 	if s.have && now.Sub(s.at) < maxAge {
 		return s.t, nil
 	}
-	if !s.failed.IsZero() && now.Sub(s.failed) < retryAfter {
+	if mode == fetchNever {
+		if s.have {
+			return s.t, nil // stale beats nothing; Prepare refreshes
+		}
+		if s.lastErr != nil {
+			return zero, s.lastErr
+		}
+		return zero, fmt.Errorf("geoip database %s is not downloaded yet", prefix)
+	}
+	if mode == fetchPaced && !s.failed.IsZero() && now.Sub(s.failed) < retryAfter {
 		if s.have {
 			return s.t, nil // stale beats nothing
 		}

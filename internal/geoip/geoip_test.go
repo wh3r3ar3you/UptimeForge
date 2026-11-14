@@ -241,3 +241,66 @@ func TestNetworkPartial(t *testing.T) {
 		t.Fatal("nothing known must be an error")
 	}
 }
+
+// With LookupOnly a lookup never downloads (it would within one agent's few
+// seconds); Prepare does, in its own context, and is not held back by the
+// hour a failed lookup download waits: its caller has its own backoff.
+func TestLookupOnlyAndPrepare(t *testing.T) {
+	var hits atomic.Int32
+	var up atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if !up.Load() {
+			http.NotFound(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/country/") {
+			w.Write(gz("ru"))
+			return
+		}
+		w.Write(gz("8359 MTS PJSC"))
+	}))
+	defer srv.Close()
+	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	d := &DB{
+		Dir:        t.TempDir(),
+		URL:        func(m time.Time) string { return srv.URL + "/country/" + m.Format("2006-01") },
+		ASNURL:     func(m time.Time) string { return srv.URL + "/asn/" + m.Format("2006-01") },
+		Now:        func() time.Time { return now },
+		LookupOnly: true,
+		open:       openFake,
+		openASN:    openFakeASN,
+	}
+	ctx := context.Background()
+	ip := netip.MustParseAddr("203.0.113.7")
+	if _, err := d.Network(ctx, ip); err == nil {
+		t.Fatal("no database yet must be an error")
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("a lookup downloaded: %d requests", hits.Load())
+	}
+	if err := d.Prepare(ctx); err == nil || hits.Load() == 0 {
+		t.Fatalf("Prepare against a dead server: err %v, %d requests", err, hits.Load())
+	}
+	up.Store(true)
+	if err := d.Prepare(ctx); err != nil {
+		t.Fatalf("Prepare right after a failure must try again: %v", err)
+	}
+	got, err := d.Network(ctx, ip)
+	if want := (Network{IP: ip, Country: "ru", ASN: "as8359", Org: "MTS PJSC"}); err != nil || got != want {
+		t.Fatalf("Network = %+v, %v; want %+v", got, err, want)
+	}
+	h := hits.Load()
+	if err := d.Prepare(ctx); err != nil || hits.Load() != h {
+		t.Fatalf("fresh databases are not downloaded again: %v, %d requests", err, hits.Load()-h)
+	}
+	// A month and more on, a lookup still answers from the stale files and
+	// does not download; Prepare refreshes.
+	now = now.Add(40 * 24 * time.Hour)
+	if got, err := d.Network(ctx, ip); err != nil || got.ASN != "as8359" || hits.Load() != h {
+		t.Fatalf("stale lookup: %+v %v, %d requests", got, err, hits.Load()-h)
+	}
+	if err := d.Prepare(ctx); err != nil || hits.Load() == h {
+		t.Fatalf("Prepare must refresh stale databases: %v", err)
+	}
+}

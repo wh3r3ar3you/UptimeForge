@@ -16,15 +16,85 @@ import (
 )
 
 // geoDB is the database behind LocateProxy and the networks of agents (a
-// fake in tests).
+// fake in tests). Lookups answer from what is there; Prepare downloads.
 type geoDB interface {
 	Country(ctx context.Context, ip netip.Addr) (string, error)
 	Network(ctx context.Context, ip netip.Addr) (geoip.Network, error)
+	Prepare(ctx context.Context) error
 }
 
-// networkLookupTimeout bounds one agent's lookup: a database being downloaded
-// must not keep its labels waiting forever; the next connect tries again.
-const networkLookupTimeout = 10 * time.Second
+const (
+	// networkLookupTimeout bounds one agent's lookup. It never downloads:
+	// keepGeo does, and looks the agent up again once a database is there.
+	networkLookupTimeout = 10 * time.Second
+	// geoRefresh is how often keepGeo looks whether a database is due a
+	// refresh (the files are monthly).
+	geoRefresh = 24 * time.Hour
+)
+
+// keepGeo downloads the geo databases in the background, not inside one
+// agent's lookup, and keeps them fresh. It starts when something first wants
+// a lookup (an agent from a public address, a proxy to locate): a hub whose
+// agents are all on private addresses never downloads. A failed download is
+// retried after a minute, doubling up to an hour. After every attempt the
+// agents nothing is known about yet are looked up again, so whoever
+// connected before a database arrived gets its network (and a checker its
+// labels) without reconnecting. wait sleeps, false when ctx ended.
+func (a *App) keepGeo(ctx context.Context, wait func(context.Context, time.Duration) bool) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-a.geoNeed:
+	}
+	var backoff time.Duration
+	for {
+		err := a.geo.Prepare(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		for id, ip := range a.Hub.UnknownNetworks() {
+			a.agentAddr(id, ip)
+		}
+		next := geoRefresh
+		if err != nil {
+			backoff = geoBackoff(backoff)
+			next = backoff
+			a.Log.Warn("geoip database download failed, will retry", "in", next, "err", err)
+		} else {
+			backoff = 0
+		}
+		if !wait(ctx, next) {
+			return
+		}
+	}
+}
+
+// wantGeo starts keepGeo if it has not started yet.
+func (a *App) wantGeo() {
+	select {
+	case a.geoNeed <- struct{}{}:
+	default:
+	}
+}
+
+// geoBackoff is the pause after a failed download that followed one of prev.
+func geoBackoff(prev time.Duration) time.Duration {
+	if prev <= 0 {
+		return time.Minute
+	}
+	return min(2*prev, time.Hour)
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
 
 // agentAddr is the hub's OnAgentAddr: it looks the address up off the hub's
 // path, hands the result to the hub and saves the labels a checker got from
@@ -36,6 +106,9 @@ func (a *App) agentAddr(probeID string, ip netip.Addr) {
 	a.mu.Unlock()
 	if parent == nil {
 		parent = context.Background()
+	}
+	if ip.IsGlobalUnicast() && !ip.IsPrivate() {
+		a.wantGeo()
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(parent, networkLookupTimeout)
@@ -129,7 +202,14 @@ func (a *App) LocateProxy(ctx context.Context, link string) (ProxyLocation, erro
 	ip = ip.Unmap()
 	cc, err := a.geo.Country(ctx, ip)
 	if err != nil {
-		return ProxyLocation{}, err
+		// No database yet: an admin waiting on the form may wait for the
+		// download (the API gives it two minutes), which an agent's lookup
+		// may not. keepGeo takes over from here.
+		a.wantGeo()
+		a.geo.Prepare(ctx) // one database may come down while the other fails
+		if cc, err = a.geo.Country(ctx, ip); err != nil {
+			return ProxyLocation{}, err
+		}
 	}
 	return ProxyLocation{Host: l.Host, IP: ip.String(), Country: cc, Source: geoip.Attribution}, nil
 }

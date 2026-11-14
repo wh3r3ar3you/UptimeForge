@@ -3026,6 +3026,37 @@ func TestCheckerKeepsNoHostData(t *testing.T) {
 	}
 }
 
+// Agents connected while the geo databases were missing are looked up again
+// once they arrive: those online with an address and nothing known about it.
+func TestUnknownNetworks(t *testing.T) {
+	h := checkerHub(t, false)
+	if got := h.UnknownNetworks(); len(got) != 0 {
+		t.Fatalf("nobody connected yet: %v", got)
+	}
+	ip := netip.MustParseAddr("203.0.113.7")
+	h.mu.Lock()
+	for _, id := range []string{"chk", "srv"} {
+		p := h.probes[id]
+		p.online, p.addr = true, ip
+		p.network = &NetworkView{IP: ip.String(), At: time.Now()} // what attach leaves before the lookup
+	}
+	h.mu.Unlock()
+	if got := h.UnknownNetworks(); len(got) != 2 || got["chk"] != ip || got["srv"] != ip {
+		t.Fatalf("both are unknown: %v", got)
+	}
+	h.SetNetwork("chk", mtsNet())
+	h.SetNetwork("srv", geoip.Network{IP: ip}) // the lookup failed: still unknown
+	if got := h.UnknownNetworks(); len(got) != 1 || got["srv"] != ip {
+		t.Fatalf("only srv is unknown: %v", got)
+	}
+	h.mu.Lock()
+	h.probes["srv"].online = false
+	h.mu.Unlock()
+	if got := h.UnknownNetworks(); len(got) != 0 {
+		t.Fatalf("an offline agent is looked up when it connects: %v", got)
+	}
+}
+
 func mtsNet() geoip.Network {
 	return geoip.Network{IP: netip.MustParseAddr("203.0.113.7"), Country: "ru", ASN: "as8359", Org: "MTS PJSC"}
 }
