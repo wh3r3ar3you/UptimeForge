@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -54,26 +56,104 @@ func TestEnrollSavesToken(t *testing.T) {
 			t.Fatalf("dir mode %v", st.Mode().Perm())
 		}
 	}
+	if got := readJoin(t, dir); got != wantHash("INV-1") {
+		t.Fatalf("join file %q, want the code's hash", got)
+	}
+	if runtime.GOOS != "windows" {
+		if st, _ := os.Stat(filepath.Join(dir, "join")); st.Mode().Perm() != 0o600 {
+			t.Fatalf("join mode %v", st.Mode().Perm())
+		}
+	}
 	entries, _ := os.ReadDir(dir)
-	if len(entries) != 1 {
-		t.Fatalf("temp files left behind: %v", entries)
+	if len(entries) != 2 {
+		t.Fatalf("want token and join only, got %v", entries)
 	}
 }
 
-// The code is single use: once the token is saved a restart must not ask the
-// hub again (it would answer 410).
-func TestEnrollUsesSavedToken(t *testing.T) {
+func wantHash(code string) string {
+	h := sha256.Sum256([]byte(code))
+	return hex.EncodeToString(h[:])
+}
+
+func readJoin(t *testing.T, dir string) string {
+	t.Helper()
+	b, _ := os.ReadFile(filepath.Join(dir, "join"))
+	return strings.TrimSpace(string(b))
+}
+
+// fakeEnrolled fakes an earlier enrolment: a token and, if code is set, the
+// hash of the code it came from.
+func fakeEnrolled(t *testing.T, dir, token, code string) {
+	t.Helper()
+	os.WriteFile(filepath.Join(dir, "token"), []byte(token+"\n"), 0o600)
+	if code != "" {
+		os.WriteFile(filepath.Join(dir, "join"), []byte(wantHash(code)+"\n"), 0o600)
+	}
+}
+
+// The code is single use: once the token is saved a restart, or join.sh run
+// again with the same spent code, must not ask the hub again (it would
+// answer 410).
+func TestEnrollSameSpentCodeKeepsSavedToken(t *testing.T) {
 	var calls atomic.Int32
 	srv := joinHub(t, 410, &calls)
 	defer srv.Close()
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "token"), []byte("saved-token\n"), 0o600)
+	fakeEnrolled(t, dir, "saved-token", "INV-1")
 	tok, err := Enroll(context.Background(), srv.URL, "INV-1", dir)
 	if err != nil || tok != "saved-token" {
 		t.Fatalf("token %q err %v", tok, err)
 	}
+	// Without a code (the token alone) it starts too.
+	if tok, err := Enroll(context.Background(), srv.URL, "", dir); err != nil || tok != "saved-token" {
+		t.Fatalf("no code: token %q err %v", tok, err)
+	}
 	if calls.Load() != 0 {
-		t.Fatal("the hub was asked although a token is saved")
+		t.Fatal("the hub was asked although a token from this code is saved")
+	}
+}
+
+// A point deleted in the UI and added again gets a new invite code; the token
+// saved from the old one is dead, so the new code is exchanged and replaces it.
+// A token with no record of its code is treated the same way.
+func TestEnrollNewCodeReplacesStaleToken(t *testing.T) {
+	for name, oldCode := range map[string]string{"other code": "INV-OLD", "no code saved": ""} {
+		var calls atomic.Int32
+		srv := joinHub(t, 200, &calls)
+		dir := t.TempDir()
+		fakeEnrolled(t, dir, "stale-token", oldCode)
+		tok, err := Enroll(context.Background(), srv.URL, "INV-1", dir)
+		srv.Close()
+		if err != nil || tok != "secret-token" {
+			t.Fatalf("%s: token %q err %v", name, tok, err)
+		}
+		if calls.Load() != 1 {
+			t.Fatalf("%s: the hub was asked %d times, want 1", name, calls.Load())
+		}
+		if b, _ := os.ReadFile(filepath.Join(dir, "token")); strings.TrimSpace(string(b)) != "secret-token" {
+			t.Fatalf("%s: saved token %q", name, b)
+		}
+		if got := readJoin(t, dir); got != wantHash("INV-1") {
+			t.Fatalf("%s: join file %q, want the new code's hash", name, got)
+		}
+	}
+}
+
+// A new code the hub refuses leaves the old state alone.
+func TestEnrollRefusedNewCodeKeepsState(t *testing.T) {
+	var calls atomic.Int32
+	srv := joinHub(t, 410, &calls)
+	defer srv.Close()
+	dir := t.TempDir()
+	fakeEnrolled(t, dir, "stale-token", "INV-OLD")
+	if _, err := Enroll(context.Background(), srv.URL, "INV-1", dir); err == nil {
+		t.Fatal("a refused code must fail the start")
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "token")); strings.TrimSpace(string(b)) != "stale-token" {
+		t.Fatalf("token %q", b)
+	}
+	if got := readJoin(t, dir); got != wantHash("INV-OLD") {
+		t.Fatalf("join file %q", got)
 	}
 }
 

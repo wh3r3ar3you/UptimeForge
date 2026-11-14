@@ -3,6 +3,8 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,15 +36,16 @@ func JoinURL(hub string) string {
 	return u + "/api/agent/join"
 }
 
-// Enroll returns the probe token. A token saved in stateDir wins: an invite
-// code is single use, so after the first start the code is never sent again.
-// Otherwise the code is exchanged at the hub and the token is saved there.
+// Enroll returns the probe token. A code is single use, so the token it was
+// swapped for is saved in stateDir with the hash of the code next to it
+// (<stateDir>/join): a restart, or join.sh run again with the same spent
+// code, starts on the saved token without asking the hub. A different code
+// (the point was deleted and added again) is exchanged and replaces both; so
+// is a code with no hash saved. Without a code the saved token is used.
 func Enroll(ctx context.Context, hub, code, stateDir string) (string, error) {
-	path := filepath.Join(stateDir, "token")
-	if b, err := os.ReadFile(path); err == nil {
-		if tok := strings.TrimSpace(string(b)); tok != "" {
-			return tok, nil
-		}
+	saved := readState(stateDir, "token")
+	if saved != "" && (code == "" || readState(stateDir, "join") == codeHash(code)) {
+		return saved, nil
 	}
 	if code == "" {
 		return "", errors.New("no invite code and no saved token")
@@ -78,18 +81,36 @@ func Enroll(ctx context.Context, hub, code, stateDir string) (string, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&out); err != nil || out.Token == "" {
 		return "", errors.New("hub answered the join without a token")
 	}
-	if err := saveToken(stateDir, out.Token); err != nil {
+	if err := saveState(stateDir, "token", out.Token); err != nil {
 		return "", fmt.Errorf("enrolled, but the token cannot be saved (the code is now spent): %w", err)
+	}
+	if err := saveState(stateDir, "join", codeHash(code)); err != nil {
+		return "", fmt.Errorf("enrolled, but the invite code's hash cannot be saved: %w", err)
 	}
 	return out.Token, nil
 }
 
-// saveToken writes the token atomically with mode 0600 into a 0700 directory.
-func saveToken(dir, token string) error {
+// codeHash is what is kept of an invite code: enough to tell it is the same
+// one, useless to anyone who reads the state directory.
+func codeHash(code string) string {
+	h := sha256.Sum256([]byte(code))
+	return hex.EncodeToString(h[:])
+}
+
+func readState(dir, name string) string {
+	b, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// saveState writes a state file atomically with mode 0600 into a 0700 directory.
+func saveState(dir, name, value string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(dir, ".token-*")
+	f, err := os.CreateTemp(dir, "."+name+"-*")
 	if err != nil {
 		return err
 	}
@@ -99,7 +120,7 @@ func saveToken(dir, token string) error {
 		f.Close()
 		return err
 	}
-	if _, err := f.WriteString(token + "\n"); err != nil {
+	if _, err := f.WriteString(value + "\n"); err != nil {
 		f.Close()
 		return err
 	}
@@ -110,7 +131,7 @@ func saveToken(dir, token string) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(dir, "token"))
+	return os.Rename(tmp, filepath.Join(dir, name))
 }
 
 // CheckHubURL applies the Run rule (no clear-text hub beyond loopback unless
