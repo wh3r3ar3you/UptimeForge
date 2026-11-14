@@ -97,7 +97,7 @@ export const BAR_STYLES: BarStyle[] = ['pill', 'line', 'thin', 'segments', 'grad
 /** Bar draws a usage share in one of the styles a user can pick. */
 export function Bar({ v, kind }: { v: number; kind: BarStyle }) {
   const x = Math.max(0, Math.min(100, v));
-  const color = x >= 90 ? status.down : x >= 75 ? status.partial : status.ok;
+  const color = x >= 90 ? sig.down : x >= 75 ? sig.warn : sig.ok;
   const style = { ['--c' as string]: color, ['--v' as string]: `${x}%`, ['--pct' as string]: Math.max(1, x) };
   switch (kind) {
     case 'none':
@@ -106,8 +106,8 @@ export function Bar({ v, kind }: { v: number; kind: BarStyle }) {
       const r = 7, len = 2 * Math.PI * r;
       return (
         <svg width="20" height="20" viewBox="0 0 20 20" style={{ flex: 'none' }} aria-hidden>
-          <circle cx="10" cy="10" r={r} fill="none" stroke={`color-mix(in srgb, ${color} 20%, transparent)`} strokeWidth="3.2" />
-          <circle cx="10" cy="10" r={r} fill="none" stroke={color} strokeWidth="3.2" strokeLinecap="round"
+          <circle cx="10" cy="10" r={r} fill="none" style={{ stroke: `color-mix(in srgb, ${color} 20%, transparent)` }} strokeWidth="3.2" />
+          <circle cx="10" cy="10" r={r} fill="none" style={{ stroke: color }} strokeWidth="3.2" strokeLinecap="round"
             strokeDasharray={`${(len * x) / 100} ${len}`} transform="rotate(-90 10 10)" />
         </svg>
       );
@@ -135,7 +135,7 @@ function Meter({ v, bar }: { v: number; bar: BarStyle }) {
 
 const pct = (v: number | undefined, warn: number, bad: number) => {
   if (v == null) return <Text size="sm" c="dimmed">—</Text>;
-  const c = v >= bad ? status.down : v >= warn ? status.partial : undefined;
+  const c = v >= bad ? sig.down : v >= warn ? sig.warn : undefined;
   return <Text size="sm" ff="monospace" c={c ?? 'dimmed'} fw={c ? 650 : undefined}>{v.toFixed(v < 10 ? 2 : 1)}%</Text>;
 };
 
@@ -155,7 +155,7 @@ export const COLUMNS: Col[] = [
       const cores = p.sysinfo?.cores, r = cores ? m.load1 / cores : 0;
       return (
         <Tooltip label={c.t('load_hint', cores ?? '?')}>
-          <Group gap={8} wrap="nowrap"><Dot color={r >= 1 ? status.down : r >= 0.7 ? status.partial : status.ok} size={8} />
+          <Group gap={8} wrap="nowrap"><Dot color={r >= 1 ? sig.down : r >= 0.7 ? sig.warn : sig.ok} size={8} />
             {mono(`${m.load1.toFixed(2)} ${m.load5.toFixed(2)} ${m.load15.toFixed(2)}`)}</Group>
         </Tooltip>
       );
@@ -176,7 +176,7 @@ export const COLUMNS: Col[] = [
         <Group gap={6} wrap="nowrap">
           {mono(num(n.usersOnline))}
           {d !== 0 && Math.abs(d) >= 5 && (
-            <Text size="xs" ff="monospace" c={d < 0 && was && n.usersOnline < was * 0.5 ? status.down : 'dimmed'}>{d > 0 ? '▲' : '▼'}{Math.abs(d)}</Text>
+            <Text size="xs" ff="monospace" c={d < 0 && was && n.usersOnline < was * 0.5 ? sig.down : 'dimmed'}>{d > 0 ? '▲' : '▼'}{Math.abs(d)}</Text>
           )}
         </Group>
       );
@@ -191,7 +191,7 @@ export const COLUMNS: Col[] = [
       const same = !c.hubVersion || p.version === c.hubVersion;
       return (
         <Tooltip label={same ? c.t('agent_ok') : c.t('agent_old', c.hubVersion ?? '')}>
-          <Group gap={6} wrap="nowrap"><IconWifi size={14} color={!p.online ? status.down : same ? status.ok : status.partial} />{mono(p.version)}</Group>
+          <Group gap={6} wrap="nowrap"><IconWifi size={14} style={{ color: !p.online ? sig.down : same ? sig.ok : sig.warn }} />{mono(p.version)}</Group>
         </Tooltip>
       );
     } },
@@ -209,6 +209,9 @@ export const COLUMNS: Col[] = [
 
 export const DEFAULT_COLUMNS = ['cpu', 'steal', 'mem', 'disk', 'load', 'net', 'traffic', 'users', 'uptime', 'agent'];
 const SYSTEM_WIDTH = 270;
+
+/** sig are the indicator colours: the user's signal palette (themes.ts), set on the page. */
+export const sig = { ok: 'var(--uf-ok)', warn: 'var(--uf-warn)', down: 'var(--uf-down)' } as const;
 const ROW = { compact: 46, normal: 64, comfortable: 76 } as const;
 
 function hostOf(s?: string) {
@@ -236,7 +239,7 @@ function stateOf(p: ProbeRow, alerts: Incident[]): State {
   return 'ok';
 }
 
-const stateColor: Record<State, string> = { ok: status.ok, warn: status.partial, problem: status.down, offline: status.down, never: status.unknown };
+const stateColor: Record<State, string> = { ok: sig.ok, warn: sig.warn, problem: sig.down, offline: sig.down, never: status.unknown };
 
 /** StateMark is the row's state: the users online of its Remnawave node in a
  * capsule coloured by the state, as the panel shows it, or a dot for a server
@@ -244,7 +247,7 @@ const stateColor: Record<State, string> = { ok: status.ok, warn: status.partial,
 function StateMark({ st, node, t }: { st: State; node?: RemnawaveNode; t: T }) {
   if (!node) return <Dot color={stateColor[st]} pulse={st === 'ok'} size={11} />;
   const off = !node.isConnected && !node.isDisabled;
-  const color = node.isDisabled ? status.unknown : off ? status.down : stateColor[st];
+  const color = node.isDisabled ? status.unknown : off ? sig.down : stateColor[st];
   return (
     <Tooltip label={off ? t('users_pill_off') : t('users_pill', num(node.usersOnline))}>
       <span className="uf-users-pill" style={{ ['--c' as string]: color }}>
@@ -580,7 +583,7 @@ export function SystemsTable({ probes: all, hubURL, incidents }: { probes: Probe
                     </Group>
                   </td>
                   {note ? (
-                    <td colSpan={visible.length}><Text size="sm" c={st === 'offline' ? status.down : 'dimmed'} truncate>{note}</Text></td>
+                    <td colSpan={visible.length}><Text size="sm" c={st === 'offline' ? sig.down : 'dimmed'} truncate>{note}</Text></td>
                   ) : visible.map((col) => <td key={col.id}>{col.cell(p, ctx, m) ?? <Text size="sm" c="dimmed">—</Text>}</td>)}
                   <td onClick={(e) => e.stopPropagation()}>
                     <Menu position="bottom-end" withinPortal>

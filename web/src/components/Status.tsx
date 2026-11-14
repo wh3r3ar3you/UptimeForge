@@ -49,7 +49,7 @@ export function Dot({ color, pulse, label, size = 9 }: { color: string; pulse?: 
   const dot = (
     <Box
       component="span"
-      className={pulse ? 'uf-pulse' : undefined}
+      className={pulse ? 'uf-dot uf-pulse' : 'uf-dot'}
       style={{ display: 'inline-block', width: size, height: size, borderRadius: size, background: color, flex: 'none', ['--uf-pulse' as string]: color }}
     />
   );
