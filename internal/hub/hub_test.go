@@ -2943,6 +2943,89 @@ func TestProbeBecomingCheckerClosesItsIncidentsQuietly(t *testing.T) {
 	}
 }
 
+// A server turned checker stops sending metrics, so nothing would ever close
+// its host incidents: they are closed without a word with the rest, and the
+// threshold timers go.
+func TestServerBecomingCheckerClosesHostIncidentsQuietly(t *testing.T) {
+	h, rec := testHub(t)
+	h.mu.Lock()
+	now := time.Now()
+	mt := meta{name: "ru-a", typ: "host", severity: "warning"}
+	h.transition("host:ru-a:cpu", model.KindHost, "", nil, mt, now)
+	h.transition("host:ru-a:disk", model.KindHost, "", nil, mt, now)
+	h.transition("host:ru-b:cpu", model.KindHost, "", nil, meta{name: "ru-b", typ: "host", severity: "warning"}, now)
+	h.probes["ru-a"].host = map[string]*hostState{"cpu": {above: now}}
+	h.mu.Unlock()
+	if rec.find(model.EventOpen, "host:ru-a:cpu") == nil || rec.find(model.EventOpen, "host:ru-a:disk") == nil {
+		t.Fatal("setup: the incidents were not announced")
+	}
+	h.mu.Lock()
+	cfg := h.cfg.Clone()
+	h.mu.Unlock()
+	for i := range cfg.Probes {
+		if cfg.Probes[i].ID == "ru-a" {
+			cfg.Probes[i].Role = RoleChecker
+		}
+	}
+	if err := h.Apply(cfg); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.incidents["host:ru-a:cpu"] != nil || h.incidents["host:ru-a:disk"] != nil {
+		t.Fatal("a checker's host incidents must be closed")
+	}
+	if rec.find(model.EventResolve, "host:ru-a:cpu") != nil || rec.find(model.EventResolve, "host:ru-a:disk") != nil {
+		t.Fatal("closing them must not notify")
+	}
+	if h.probes["ru-a"].host != nil {
+		t.Fatal("a checker keeps no host threshold timers")
+	}
+	if h.incidents["host:ru-b:cpu"] == nil {
+		t.Fatal("another server's host incident was closed")
+	}
+}
+
+// A checker is someone else's machine: the hub keeps nothing of its host,
+// whether it was a server before or says something about its host now.
+func TestCheckerKeepsNoHostData(t *testing.T) {
+	h := checkerHub(t, false)
+	si := proto.SysInfo{Cores: 4, OS: "linux"}
+	h.IngestSysInfo("chk", si)
+	h.IngestSysInfo("srv", si)
+	h.IngestMetrics("srv", cpuAt(5))
+	h.mu.Lock()
+	if h.probes["chk"].sysinfo != nil {
+		t.Fatal("a checker's sysinfo was kept")
+	}
+	if h.probes["srv"].sysinfo == nil || h.probes["srv"].metrics == nil {
+		t.Fatal("setup: a server agent's sysinfo and metrics must be kept")
+	}
+	cfg := h.cfg.Clone()
+	h.mu.Unlock()
+	for i := range cfg.Probes {
+		if cfg.Probes[i].ID == "srv" {
+			cfg.Probes[i].Role, cfg.Probes[i].Probing = RoleChecker, false
+		}
+	}
+	if err := h.Apply(cfg); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	if p := h.probes["srv"]; p.sysinfo != nil || p.metrics != nil || !p.metricsAt.IsZero() {
+		h.mu.Unlock()
+		t.Fatal("a server turned checker kept its host data")
+	}
+	// Whatever slips in, the snapshot (and so every viewer) does not show it.
+	h.probes["chk"].sysinfo, h.probes["chk"].metrics = &si, &proto.Metrics{CPU: 1}
+	h.mu.Unlock()
+	for _, ps := range h.Snapshot().Probes {
+		if (ps.ID == "chk" || ps.ID == "srv") && (ps.SysInfo != nil || ps.Metrics != nil || !ps.MetricsAt.IsZero()) {
+			t.Fatalf("snapshot shows host data of checker %s", ps.ID)
+		}
+	}
+}
+
 func mtsNet() geoip.Network {
 	return geoip.Network{IP: netip.MustParseAddr("203.0.113.7"), Country: "ru", ASN: "as8359", Org: "MTS PJSC"}
 }

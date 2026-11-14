@@ -191,9 +191,7 @@ func (h *Hub) handleAgent(w http.ResponseWriter, r *http.Request) {
 		case proto.TypeSysInfo:
 			var si proto.SysInfo
 			if json.Unmarshal(env.Data, &si) == nil {
-				h.mu.Lock()
-				p.sysinfo = &si
-				h.mu.Unlock()
+				h.IngestSysInfo(id, si)
 			}
 		case proto.TypeRunResult:
 			var rr proto.RunResult
@@ -322,8 +320,10 @@ func (h *Hub) Snapshot() Status {
 			mode = "local"
 		}
 		ps := ProbeStatus{ID: id, Name: p.cfg.Name, Labels: p.cfg.Labels, Region: p.cfg.Labels[h.cfg.RegionLabel], Mode: mode,
-			Online: p.online, Internet: !p.noNet, Since: p.since, Version: p.hello.Version, Host: p.hello.Hostname,
-			SysInfo: p.sysinfo, Metrics: p.metrics, MetricsAt: p.metricsAt}
+			Online: p.online, Internet: !p.noNet, Since: p.since, Version: p.hello.Version, Host: p.hello.Hostname}
+		if !p.cfg.Checker() { // someone else's machine: its host stays its owner's
+			ps.SysInfo, ps.Metrics, ps.MetricsAt = p.sysinfo, p.metrics, p.metricsAt
+		}
 		if p.cfg.Local {
 			ps.Version = version.Version
 		}

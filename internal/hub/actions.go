@@ -120,6 +120,16 @@ func (h *Hub) byID(id string) *model.Incident {
 	return nil
 }
 
+// IngestSysInfo keeps what an agent says about its host. A checker's is
+// dropped, like its metrics.
+func (h *Hub) IngestSysInfo(probeID string, si proto.SysInfo) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if p := h.probes[probeID]; p != nil && !p.cfg.Checker() {
+		p.sysinfo = &si
+	}
+}
+
 // IngestMetrics takes a host snapshot of a probe: it becomes the probe's
 // latest, goes to its live watchers, and, at the usual rate, to storage and
 // host alerts (see storeDue; while live, what is stored is the aggregate of
