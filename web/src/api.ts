@@ -376,6 +376,8 @@ export function sysPoint(m: LivePoint): SysPoint {
 export const LIVE_POINTS = 60;
 /** A tab hidden this long closes its stream, so a forgotten tab does not keep an agent at 1 s; it reopens when shown. */
 const LIVE_HIDDEN_MS = 30_000;
+/** Pauses before reopening a refused live stream; the last one repeats. */
+const LIVE_BACKOFF_MS = [5_000, 10_000, 30_000, 60_000];
 
 /**
  * useLiveMetrics streams a server's host metrics while `on`: the last
@@ -416,30 +418,69 @@ export function useLiveMetrics(id: string, on: boolean) {
     setPoints([]);
     setArrivals([]);
     setState('connecting');
-    const es = new EventSource(`/api/v1/probes/${enc(id)}/live`);
-    es.onopen = () => {
-      setState('open');
-      setOpened(Date.now());
+    const url = `/api/v1/probes/${enc(id)}/live`;
+    let es: EventSource | undefined;
+    let retry: number | undefined;
+    let probe: AbortController | undefined;
+    let fails = 0; // CLOSED streams in a row, reset by the first point
+    let dead = false;
+    const connect = () => {
+      es = new EventSource(url);
+      es.onopen = () => {
+        setState('open');
+        setOpened(Date.now());
+      };
+      es.onmessage = (ev) => {
+        let m: LivePoint;
+        try {
+          m = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        fails = 0;
+        const now = Date.now();
+        if (!m.age || m.age < 2) skew.current = m.at - now;
+        setState('open');
+        const p = sysPoint(m);
+        setPoints((ps) => [...ps.filter((x) => x.t !== p.t), p].sort((a, b) => a.t - b.t).slice(-LIVE_POINTS));
+        setArrivals((a) => [...a.filter((x) => x > now - 10_000), now]);
+      };
+      // EventSource retries a dropped connection by itself (CONNECTING). A
+      // CLOSED one was refused (a proxy's 502 while the hub restarts, or a
+      // real 401/403/404): reopen it with backoff, and give up loudly only
+      // after 3 refusals in a row or when a plain request says it is permanent.
+      es.onerror = () => {
+        if (es?.readyState !== EventSource.CLOSED) {
+          setState('lost');
+          return;
+        }
+        es.close();
+        fails++;
+        setState(fails >= 3 ? 'failed' : 'lost');
+        probe = new AbortController();
+        fetch(url, { signal: probe.signal })
+          .then((r) => {
+            probe?.abort(); // only the status matters; do not hold a stream open
+            if (dead) return;
+            if ([401, 403, 404].includes(r.status)) {
+              setState('failed');
+              return;
+            }
+            retry = window.setTimeout(connect, LIVE_BACKOFF_MS[Math.min(fails, LIVE_BACKOFF_MS.length) - 1]);
+          })
+          .catch(() => {
+            if (dead) return;
+            retry = window.setTimeout(connect, LIVE_BACKOFF_MS[Math.min(fails, LIVE_BACKOFF_MS.length) - 1]);
+          });
+      };
     };
-    es.onmessage = (ev) => {
-      let m: LivePoint;
-      try {
-        m = JSON.parse(ev.data);
-      } catch {
-        return;
-      }
-      const now = Date.now();
-      if (!m.age || m.age < 2) skew.current = m.at - now;
-      setState('open');
-      setPoints((ps) => [...ps, sysPoint(m)].sort((a, b) => a.t - b.t).slice(-LIVE_POINTS));
-      setArrivals((a) => [...a.filter((x) => x > now - 10_000), now]);
-    };
-    // EventSource retries a dropped connection by itself (CONNECTING); a
-    // refused one (404, 401) is CLOSED for good.
-    es.onerror = () => setState(es.readyState === EventSource.CLOSED ? 'failed' : 'lost');
+    connect();
     const iv = window.setInterval(() => setTick(Date.now()), 1000);
     return () => {
-      es.close();
+      dead = true;
+      es?.close();
+      probe?.abort();
+      window.clearTimeout(retry);
       window.clearInterval(iv);
     };
   }, [id, on, awake]);
