@@ -19,7 +19,7 @@ func (n NodeUsers) Ref() NodeRef {
 
 // ProbeRef is a server as it is matched to a panel node.
 type ProbeRef struct {
-	Link     string     // the node's uuid when linked by hand (ProbeConfig.RemnawaveNode)
+	Link     string // the node's uuid when linked by hand (ProbeConfig.RemnawaveNode)
 	ID, Name string
 	Host     string     // the host name its agent reports
 	Addr     netip.Addr // where its agent connects from
