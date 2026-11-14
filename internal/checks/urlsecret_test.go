@@ -15,6 +15,19 @@ func TestURLCarriesSecret(t *testing.T) {
 		"https://example.com/health#frag-0f8e6c1d2b3a4f5e":        false,
 		"":            false,
 		"example.com": false,
+		// encoded, padded or dotted tokens are tokens too
+		"https://x.example.com/?t=dGhpc2lzYXNlY3JldDEyMw==":                                                                         true,
+		"https://x.example.com/?%74oken=abc":                                                                                        true,
+		"https://x.example.com/?q=abc%2D123%2Dxyz%2D789":                                                                            true,
+		"https://x.example.com/p%5Fq7Xk2LmN9vRt4Z":                                                                                  true,
+		"https://api.telegram.org/bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/getMe":                                            true,
+		"https://x.example.com/cb?jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U": true,
+		// what cannot be decoded is assumed to hide one
+		"https://x.example.com/?q=100%zz": true,
+		// versioned file names and plain words are not tokens
+		"https://cdn.example.com/lib/jquery-3.7.1.min.js":      false,
+		"https://example.com/search?q=hello%20world":           false,
+		"https://example.com/report?from=2026-11-14T10:00:00Z": false,
 	} {
 		if got := URLCarriesSecret(in); got != want {
 			t.Errorf("URLCarriesSecret(%q) = %v, want %v", in, got, want)
